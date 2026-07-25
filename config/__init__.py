@@ -1,0 +1,3 @@
+"""
+SourceScout configuration package.
+"""
