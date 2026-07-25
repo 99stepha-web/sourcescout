@@ -1,82 +1,63 @@
 """
-SourceScout Trend Analyzer
+Trend Analyzer
 
-Evaluates market demand using normalized intelligence models.
-
-Author: SourceScout
+Evaluates market demand based on sales and reviews.
 """
 
 from __future__ import annotations
 
-from intelligence.analyzer import BaseAnalyzer
+from config.intelligence import TREND_CONFIG
+
+from intelligence.analyzer import (
+    AnalyzerResult,
+    BaseAnalyzer,
+)
+
 from intelligence.models import IntelligenceContext
 
 
 class TrendAnalyzer(BaseAnalyzer):
-    """
-    Measures product demand.
 
-    Uses normalized marketplace data only.
-    """
+    NAME = "trend"
 
-    NAME = "Trend Analyzer"
+    @staticmethod
+    def _band_score(value: int, bands: list[tuple[int, int]]) -> float:
+        for limit, score in bands:
+            if value <= limit:
+                return float(score)
+        return 100.0
 
-    SALES_WEIGHT = 0.70
-    REVIEW_WEIGHT = 0.30
+    def analyze(
+        self,
+        context: IntelligenceContext,
+    ) -> AnalyzerResult:
 
-    MAX_MONTHLY_SALES = 10000
-    MAX_REVIEWS = 3000
-
-    def analyze(self, context: IntelligenceContext):
-
-        sales_score = self._normalize(
+        sales_score = self._band_score(
             context.market.monthly_sales,
-            self.MAX_MONTHLY_SALES,
+            TREND_CONFIG["sales_bands"],
         )
 
-        review_score = self._normalize(
+        review_score = self._band_score(
             context.market.review_count,
-            self.MAX_REVIEWS,
+            TREND_CONFIG["review_bands"],
         )
 
-        trend_score = (
-            sales_score * self.SALES_WEIGHT +
-            review_score * self.REVIEW_WEIGHT
+        weights = TREND_CONFIG["weights"]
+
+        score = (
+            sales_score * weights["sales"]
+            + review_score * weights["reviews"]
         )
 
         return self.result(
-            score=trend_score,
-            summary=self._summary(trend_score),
+            score=score,
+            confidence=score / 100,
+            summary=self.level(score),
             details={
                 "marketplace": context.marketplace,
                 "monthly_sales": context.market.monthly_sales,
                 "review_count": context.market.review_count,
-                "sales_score": round(sales_score, 2),
-                "review_score": round(review_score, 2),
+                "sales_score": sales_score,
+                "review_score": review_score,
             },
         )
-
-    @staticmethod
-    def _normalize(value: int, maximum: int) -> float:
-
-        if value <= 0:
-            return 0.0
-
-        return min(value / maximum, 1.0) * 100
-
-    @staticmethod
-    def _summary(score: float) -> str:
-
-        if score >= 90:
-            return "Exceptional market demand."
-
-        if score >= 75:
-            return "Strong and growing demand."
-
-        if score >= 60:
-            return "Healthy demand."
-
-        if score >= 40:
-            return "Moderate demand."
-
-        return "Weak demand."
