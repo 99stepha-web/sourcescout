@@ -1,7 +1,7 @@
 """
 SourceScout Product Scorer
 
-Aggregates analyzer results into a final intelligence score.
+Aggregates analyzer results into a final product score.
 
 Author: SourceScout
 """
@@ -10,88 +10,56 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from intelligence.analyzer import AnalyzerResult
+from config.intelligence import SCORER_CONFIG
+
 from intelligence.report import AnalyzerResults
 
 
 @dataclass(slots=True)
 class ScoreResult:
-    """
-    Final aggregated score.
-    """
-
     overall_score: float
-
     decision: str
-
     confidence: float
 
 
 class ProductScorer:
-    """
-    Aggregates analyzer results.
-
-    This class contains no marketplace-specific logic.
-    """
-
-    TREND_WEIGHT = 0.30
-    COMPETITION_WEIGHT = 0.20
-    SUPPLIER_WEIGHT = 0.20
-    PRICING_WEIGHT = 0.15
-    PROFITABILITY_WEIGHT = 0.15
 
     def score(
         self,
         results: AnalyzerResults,
     ) -> ScoreResult:
 
+        weights = SCORER_CONFIG["weights"]
+
         overall = (
-            results.trend.score * self.TREND_WEIGHT
-            + results.competition.score * self.COMPETITION_WEIGHT
-            + results.supplier.score * self.SUPPLIER_WEIGHT
-            + results.pricing.score * self.PRICING_WEIGHT
-            + results.profitability.score * self.PROFITABILITY_WEIGHT
+            results.trend.score * weights["trend"]
+            + results.competition.score * weights["competition"]
+            + results.supplier.score * weights["supplier"]
+            + results.pricing.score * weights["pricing"]
+            + results.profitability.score * weights["profitability"]
         )
 
-        confidence = self._confidence(results)
+        confidence = (
+            results.trend.confidence
+            + results.competition.confidence
+            + results.supplier.confidence
+            + results.pricing.confidence
+            + results.profitability.confidence
+        ) / 5
 
-        decision = self._decision(overall)
+        thresholds = SCORER_CONFIG["decision_thresholds"]
+
+        if overall >= thresholds["STRONG_BUY"]:
+            decision = "STRONG_BUY"
+        elif overall >= thresholds["BUY"]:
+            decision = "BUY"
+        elif overall >= thresholds["REVIEW"]:
+            decision = "REVIEW"
+        else:
+            decision = "REJECT"
 
         return ScoreResult(
             overall_score=round(overall, 2),
             decision=decision,
             confidence=round(confidence, 2),
         )
-
-    @staticmethod
-    def _confidence(results: AnalyzerResults) -> float:
-        """
-        Average confidence across all analyzers.
-        """
-
-        confidences = [
-            results.trend.confidence,
-            results.competition.confidence,
-            results.supplier.confidence,
-            results.pricing.confidence,
-            results.profitability.confidence,
-        ]
-
-        return sum(confidences) / len(confidences)
-
-    @staticmethod
-    def _decision(score: float) -> str:
-        """
-        Translate overall score into a recommendation.
-        """
-
-        if score >= 85:
-            return "STRONG_BUY"
-
-        if score >= 70:
-            return "BUY"
-
-        if score >= 55:
-            return "REVIEW"
-
-        return "REJECT"
