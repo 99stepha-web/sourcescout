@@ -1,7 +1,7 @@
 """
-SourceScout Competition Analyzer
+Competition Analyzer
 
-Evaluates market saturation using normalized intelligence models.
+Evaluates how competitive a product niche is.
 
 Higher score = Lower competition.
 
@@ -10,55 +10,56 @@ Author: SourceScout
 
 from __future__ import annotations
 
-from intelligence.analyzer import BaseAnalyzer
+from config.intelligence import COMPETITION_CONFIG
+
+from intelligence.analyzer import (
+    AnalyzerResult,
+    BaseAnalyzer,
+)
+
 from intelligence.models import IntelligenceContext
 
 
 class CompetitionAnalyzer(BaseAnalyzer):
-    """
-    Evaluates market competition.
 
-    Higher score means lower competition.
-    """
+    NAME = "competition"
 
-    NAME = "Competition Analyzer"
+    def analyze(
+        self,
+        context: IntelligenceContext,
+    ) -> AnalyzerResult:
 
-    REVIEW_WEIGHT = 0.40
-    FOLLOWER_WEIGHT = 0.30
-    VERIFIED_WEIGHT = 0.20
-    RATING_WEIGHT = 0.10
-
-    MAX_REVIEWS = 5000
-    MAX_FOLLOWERS = 100000
-
-    def analyze(self, context: IntelligenceContext):
-
-        review_component = self._review_component(
-            context.market.review_count
+        review_component = max(
+            0.0,
+            100.0 - min(context.market.review_count / 1000 * 100, 100),
         )
 
-        follower_component = self._follower_component(
-            context.supplier.follower_count
+        follower_component = max(
+            0.0,
+            100.0 - min(context.supplier.follower_count / 50000 * 100, 100),
         )
 
-        verified_component = self._verified_component(
-            context.supplier.verified
+        verified_component = (
+            40.0 if context.supplier.verified else 100.0
         )
 
-        rating_component = self._rating_component(
-            context.market.rating
+        rating_component = max(
+            0.0,
+            100.0 - (context.market.rating * 20),
         )
 
-        competition_score = (
-            review_component * self.REVIEW_WEIGHT
-            + follower_component * self.FOLLOWER_WEIGHT
-            + verified_component * self.VERIFIED_WEIGHT
-            + rating_component * self.RATING_WEIGHT
+        weights = COMPETITION_CONFIG["weights"]
+
+        score = (
+            review_component * weights["reviews"]
+            + follower_component * weights["followers"]
+            + verified_component * weights["verified"]
+            + rating_component * weights["rating"]
         )
 
         return self.result(
-            score=competition_score,
-            summary=self._summary(competition_score),
+            score=score,
+            summary="Competition evaluated from reviews, followers, supplier verification and rating.",
             details={
                 "marketplace": context.marketplace,
                 "review_count": context.market.review_count,
@@ -71,59 +72,3 @@ class CompetitionAnalyzer(BaseAnalyzer):
                 "rating_component": round(rating_component, 2),
             },
         )
-
-    # -------------------------------------------------
-
-    def _review_component(self, reviews: int) -> float:
-        """
-        More reviews generally indicate stronger competition.
-        """
-        normalized = min(reviews / self.MAX_REVIEWS, 1.0)
-        return (1.0 - normalized) * 100
-
-    # -------------------------------------------------
-
-    def _follower_component(self, followers: int) -> float:
-        """
-        Large seller audiences increase competition.
-        """
-        normalized = min(followers / self.MAX_FOLLOWERS, 1.0)
-        return (1.0 - normalized) * 100
-
-    # -------------------------------------------------
-
-    @staticmethod
-    def _verified_component(is_verified: bool) -> float:
-        """
-        Verified suppliers usually make the market more competitive.
-        """
-        return 40.0 if is_verified else 100.0
-
-    # -------------------------------------------------
-
-    @staticmethod
-    def _rating_component(rating: float) -> float:
-        """
-        Higher ratings suggest stronger competitors.
-        """
-        normalized = min(rating / 5.0, 1.0)
-        return (1.0 - normalized) * 100
-
-    # -------------------------------------------------
-
-    @staticmethod
-    def _summary(score: float) -> str:
-
-        if score >= 90:
-            return "Very low competition with strong entry potential."
-
-        if score >= 75:
-            return "Moderate competition and attractive opportunity."
-
-        if score >= 60:
-            return "Competitive market with room to differentiate."
-
-        if score >= 40:
-            return "Highly competitive market."
-
-        return "Extremely saturated market."
