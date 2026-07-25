@@ -1,0 +1,56 @@
+def normalize(value, maximum):
+    """Convert a value into a 0-100 score."""
+    if maximum <= 0:
+        return 0
+
+    return min((value / maximum) * 100, 100)
+
+
+def calculate_discount(price, original_price):
+    """Calculate the real percentage discount."""
+    if original_price <= 0 or price <= 0:
+        return 0
+
+    if price >= original_price:
+        return 0
+
+    return ((original_price - price) / original_price) * 100
+
+
+def calculate_opportunity_score(product):
+    """
+    Calculate a product opportunity score from 0 to 100.
+
+    This is Version 1.
+    Later Claude will add AI-based analysis.
+    """
+
+    # Demand: maximum score at 1,000+ orders
+    demand_score = normalize(product.orders, 1000)
+
+    # Rating: convert 5-star rating to 100
+    rating_score = normalize(product.rating, 5)
+
+    # Supplier credibility: convert 5-point score to 100
+    supplier_score = normalize(product.supplier_score, 5)
+
+    # Affiliate earning potential
+    commission_score = normalize(product.commission_rate, 15)
+
+    # Discount attractiveness
+    discount_percentage = calculate_discount(
+        product.price,
+        product.original_price,
+    )
+    discount_score = normalize(discount_percentage, 50)
+
+    # Weighted final score
+    final_score = (
+        demand_score * 0.25
+        + rating_score * 0.20
+        + supplier_score * 0.20
+        + commission_score * 0.20
+        + discount_score * 0.15
+    )
+
+    return round(final_score, 1)

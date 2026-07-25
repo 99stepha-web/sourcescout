@@ -1,0 +1,66 @@
+from database import SessionLocal
+from models import Product
+
+
+DEFAULT_SHORTLIST_THRESHOLD = 60
+
+
+def get_shortlisted_products(
+    threshold=DEFAULT_SHORTLIST_THRESHOLD,
+    only_unanalyzed=True,
+):
+    """
+    Return products that meet the opportunity-score
+    threshold and are candidates for Claude analysis.
+    """
+
+    db = SessionLocal()
+
+    try:
+        query = (
+            db.query(Product)
+            .filter(
+                Product.opportunity_score >= threshold
+            )
+        )
+
+        if only_unanalyzed:
+            query = query.filter(
+                Product.ai_analyzed_at.is_(None)
+            )
+
+        products = (
+            query
+            .order_by(
+                Product.opportunity_score.desc()
+            )
+            .all()
+        )
+
+        return products
+
+    finally:
+        db.close()
+
+
+def get_shortlist_count(
+    threshold=DEFAULT_SHORTLIST_THRESHOLD,
+):
+    """
+    Count unanalyzed products above the threshold.
+    """
+
+    db = SessionLocal()
+
+    try:
+        return (
+            db.query(Product)
+            .filter(
+                Product.opportunity_score >= threshold,
+                Product.ai_analyzed_at.is_(None),
+            )
+            .count()
+        )
+
+    finally:
+        db.close()

@@ -1,0 +1,3579 @@
+from pathlib import Path
+import json
+import sqlite3
+
+import pandas as pd
+import streamlit as st
+import streamlit.components.v1 as components
+from product_ingestion import ingest_products
+from marketplace_discovery import discover_products
+from product_ingestion import ingest_product
+
+
+from analysis_service import analyze_and_save_product
+from database import SessionLocal
+from models import Product
+from publishing_service import generate_and_save_article
+from shortlist_service import get_shortlisted_products
+from affiliate_service import (
+    get_products_missing_affiliate_links,
+    save_affiliate_url,
+)
+from article_queue_service import (
+    get_article_queue,
+    get_review_queue,
+)
+from website_publisher import publish_product
+
+
+# --------------------------------------------------
+# Page configuration
+# --------------------------------------------------
+
+st.set_page_config(
+    page_title="AI Affiliate Product Scout",
+    page_icon="🔎",
+    layout="wide",
+)
+
+
+st.title("🔎 AI Affiliate Product Scout")
+
+st.caption(
+    "Discover, rank, analyze and prepare affiliate "
+    "product opportunities for publication."
+)
+
+
+# --------------------------------------------------
+# Database connection
+# --------------------------------------------------
+
+db = SessionLocal()
+
+
+# --------------------------------------------------
+# SourceScout Pipeline Dashboard
+# --------------------------------------------------
+
+st.divider()
+
+st.subheader(
+    "📊 SourceScout Pipeline Dashboard"
+)
+
+st.caption(
+    "Live overview of products moving from discovery "
+    "through AI analysis, article preparation and publication."
+)
+
+
+# --------------------------------------------------
+# Pipeline counts
+# --------------------------------------------------
+
+pipeline_products = (
+    db.query(Product)
+    .order_by(
+        Product.id.desc()
+    )
+    .all()
+)
+
+
+total_discovered = len(
+    pipeline_products
+)
+
+
+claude_analyzed = [
+    product
+    for product in pipeline_products
+    if getattr(
+        product,
+        "ai_decision",
+        None,
+    )
+]
+
+
+ready_for_articles = [
+    product
+    for product in pipeline_products
+    if (
+        (
+            getattr(
+                product,
+                "ai_decision",
+                None,
+            )
+            == "APPROVE"
+        )
+        or (
+            getattr(
+                product,
+                "editorial_decision",
+                None,
+            )
+            == "APPROVE"
+        )
+    )
+    and (
+        getattr(
+            product,
+            "publish_status",
+            None,
+        )
+        == "draft"
+    )
+    and not getattr(
+        product,
+        "article_content",
+        None,
+    )
+]
+
+
+ready_to_publish = [
+    product
+    for product in pipeline_products
+    if (
+        getattr(
+            product,
+            "publish_status",
+            None,
+        )
+        == "ready"
+    )
+    and bool(
+        getattr(
+            product,
+            "article_content",
+            None,
+        )
+    )
+]
+
+
+waiting_for_affiliate = [
+    product
+    for product in ready_to_publish
+    if not (
+        getattr(
+            product,
+            "affiliate_url",
+            None,
+        )
+        or ""
+    ).strip()
+]
+
+
+publishable_now = [
+    product
+    for product in ready_to_publish
+    if (
+        getattr(
+            product,
+            "affiliate_url",
+            None,
+        )
+        or ""
+    ).strip()
+]
+
+
+published_products_dashboard = [
+    product
+    for product in pipeline_products
+    if getattr(
+        product,
+        "publish_status",
+        None,
+    )
+    == "published"
+]
+
+
+# --------------------------------------------------
+# Main pipeline metrics
+# --------------------------------------------------
+
+dashboard_col1, dashboard_col2, dashboard_col3 = (
+    st.columns(3)
+)
+
+dashboard_col4, dashboard_col5, dashboard_col6 = (
+    st.columns(3)
+)
+
+
+dashboard_col1.metric(
+    "🔎 Discovered",
+    total_discovered,
+)
+
+dashboard_col2.metric(
+    "🤖 Claude Analyzed",
+    len(
+        claude_analyzed
+    ),
+)
+
+dashboard_col3.metric(
+    "✍️ Ready for Articles",
+    len(
+        ready_for_articles
+    ),
+)
+
+dashboard_col4.metric(
+    "📦 Articles Ready",
+    len(
+        ready_to_publish
+    ),
+)
+
+dashboard_col5.metric(
+    "⏳ Waiting for Affiliate",
+    len(
+        waiting_for_affiliate
+    ),
+)
+
+dashboard_col6.metric(
+    "🌐 Published",
+    len(
+        published_products_dashboard
+    ),
+)
+
+
+# --------------------------------------------------
+# Pipeline progress summary
+# --------------------------------------------------
+
+if total_discovered:
+
+    analyzed_percentage = round(
+        (
+            len(
+                claude_analyzed
+            )
+            / total_discovered
+        )
+        * 100
+    )
+
+    st.progress(
+        min(
+            analyzed_percentage / 100,
+            1.0,
+        ),
+        text=(
+            f"{analyzed_percentage}% of imported "
+            "products have completed Claude analysis."
+        ),
+    )
+
+
+# --------------------------------------------------
+# Products requiring action
+# --------------------------------------------------
+
+st.markdown(
+    "### 🎯 SourceScout Control Center"
+)
+
+
+action_tab1, action_tab2, action_tab3, action_tab4 = (
+    st.tabs(
+        [
+            (
+                "⏳ Waiting for Affiliate "
+                f"({len(waiting_for_affiliate)})"
+            ),
+            (
+                "✍️ Generate Articles "
+                f"({len(ready_for_articles)})"
+            ),
+            (
+                "🚀 Ready to Publish "
+                f"({len(publishable_now)})"
+            ),
+            (
+                "🌐 Published "
+                f"({len(published_products_dashboard)})"
+            ),
+        ]
+    )
+)
+
+
+# ==================================================
+# TAB 1 — WAITING FOR AFFILIATE
+# ==================================================
+
+with action_tab1:
+
+    if not waiting_for_affiliate:
+
+        st.success(
+            "No generated articles are currently "
+            "waiting for affiliate links."
+        )
+
+    else:
+
+        for product in waiting_for_affiliate:
+
+            with st.container(
+                border=True
+            ):
+
+                st.markdown(
+                    f"### {product.title}"
+                )
+
+                st.caption(
+                    f"{product.platform} "
+                    f"• Status: {product.publish_status}"
+                )
+
+                metric_col1, metric_col2 = (
+                    st.columns(2)
+                )
+
+                metric_col1.metric(
+                    "Opportunity Score",
+                    product.opportunity_score or 0,
+                )
+
+                metric_col2.metric(
+                    "Claude Score",
+                    product.ai_score or 0,
+                )
+
+                st.warning(
+                    "Affiliate tracking link required "
+                    "before production publishing."
+                )
+
+
+                preview_col, affiliate_col = (
+                    st.columns(2)
+                )
+
+
+                # ----------------------------------
+                # Preview article
+                # ----------------------------------
+
+                with preview_col:
+
+                    if st.button(
+                        "👁️ Preview Article",
+                        key=(
+                            "dashboard_wait_preview_"
+                            f"{product.id}"
+                        ),
+                        use_container_width=True,
+                    ):
+
+                        try:
+
+                            preview_path = publish_product(
+                                product.id,
+                                auto_deploy=False,
+                            )
+
+                            preview_html = (
+                                Path(
+                                    preview_path
+                                )
+                                .read_text(
+                                    encoding="utf-8"
+                                )
+                            )
+
+                            st.session_state[
+                                "dashboard_preview_product_id"
+                            ] = product.id
+
+                            st.session_state[
+                                "dashboard_preview_html"
+                            ] = preview_html
+
+                        except Exception as error:
+
+                            st.error(
+                                "Preview generation failed: "
+                                f"{error}"
+                            )
+
+
+                # ----------------------------------
+                # Affiliate link input
+                # ----------------------------------
+
+                with affiliate_col:
+
+                    with st.popover(
+                        "🔗 Add Affiliate Link",
+                        use_container_width=True,
+                    ):
+
+                        affiliate_url = (
+                            st.text_input(
+                                "Affiliate Tracking URL",
+                                key=(
+                                    "dashboard_affiliate_"
+                                    f"{product.id}"
+                                ),
+                                placeholder=(
+                                    "Paste the real affiliate "
+                                    "tracking URL"
+                                ),
+                            )
+                        )
+
+                        if st.button(
+                            "💾 Save Affiliate Link",
+                            key=(
+                                "dashboard_save_affiliate_"
+                                f"{product.id}"
+                            ),
+                            type="primary",
+                            use_container_width=True,
+                        ):
+
+                            try:
+
+                                save_affiliate_url(
+                                    product.id,
+                                    affiliate_url,
+                                )
+
+                                st.success(
+                                    "Affiliate link saved."
+                                )
+
+                                st.rerun()
+
+                            except Exception as error:
+
+                                st.error(
+                                    "Could not save affiliate "
+                                    f"link: {error}"
+                                )
+
+
+                # ----------------------------------
+                # Render preview
+                # ----------------------------------
+
+                if (
+                    st.session_state.get(
+                        "dashboard_preview_product_id"
+                    )
+                    == product.id
+                    and st.session_state.get(
+                        "dashboard_preview_html"
+                    )
+                ):
+
+                    st.divider()
+
+                    preview_header_col1, preview_header_col2 = (
+                        st.columns(
+                            [4, 1]
+                        )
+                    )
+
+                    with preview_header_col1:
+
+                        st.markdown(
+                            "#### 👁️ Website Preview"
+                        )
+
+                    with preview_header_col2:
+
+                        if st.button(
+                            "✖ Close Preview",
+                            key=(
+                                "dashboard_close_wait_preview_"
+                                f"{product.id}"
+                            ),
+                            use_container_width=True,
+                        ):
+
+                            st.session_state.pop(
+                                "dashboard_preview_product_id",
+                                None,
+                            )
+
+                            st.session_state.pop(
+                                "dashboard_preview_html",
+                                None,
+                            )
+
+                            st.rerun()
+
+
+                    components.html(
+                        st.session_state[
+                            "dashboard_preview_html"
+                        ],
+                        height=900,
+                        scrolling=True,
+                    )
+
+
+# ==================================================
+# TAB 2 — GENERATE ARTICLES
+# ==================================================
+
+with action_tab2:
+
+    if not ready_for_articles:
+
+        st.success(
+            "No approved products are currently "
+            "waiting for article generation."
+        )
+
+    else:
+
+        for product in ready_for_articles:
+
+            with st.container(
+                border=True
+            ):
+
+                st.markdown(
+                    f"### {product.title}"
+                )
+
+                st.caption(
+                    f"{product.platform} "
+                    f"• Opportunity Score: "
+                    f"{product.opportunity_score or 0}"
+                )
+
+                metric_col1, metric_col2 = (
+                    st.columns(2)
+                )
+
+                metric_col1.metric(
+                    "Opportunity Score",
+                    product.opportunity_score or 0,
+                )
+
+                metric_col2.metric(
+                    "Claude Score",
+                    product.ai_score or 0,
+                )
+
+
+                if st.button(
+                    "✍️ Generate Article",
+                    key=(
+                        "dashboard_generate_article_"
+                        f"{product.id}"
+                    ),
+                    type="primary",
+                    use_container_width=True,
+                ):
+
+                    try:
+
+                        with st.spinner(
+                            "Claude is generating "
+                            "the SourceScout article..."
+                        ):
+
+                            generate_and_save_article(
+                                product.id
+                            )
+
+                        st.success(
+                            "Article generated successfully. "
+                            "The product is now ready "
+                            "for publishing."
+                        )
+
+                        st.rerun()
+
+                    except Exception as error:
+
+                        st.error(
+                            "Article generation failed: "
+                            f"{error}"
+                        )
+
+
+# ==================================================
+# TAB 3 — READY TO PUBLISH
+# ==================================================
+
+with action_tab3:
+
+    if not publishable_now:
+
+        st.info(
+            "No articles currently have both generated "
+            "content and an affiliate tracking link."
+        )
+
+    else:
+
+        for product in publishable_now:
+
+            with st.container(
+                border=True
+            ):
+
+                st.markdown(
+                    f"### {product.title}"
+                )
+
+                st.caption(
+                    f"{product.platform} "
+                    "• Affiliate link ready "
+                    "• Status: ready"
+                )
+
+                st.success(
+                    "This article has an affiliate link "
+                    "and is ready for production publishing."
+                )
+
+
+                preview_col, publish_col = (
+                    st.columns(2)
+                )
+
+
+                # ----------------------------------
+                # Preview
+                # ----------------------------------
+
+                with preview_col:
+
+                    if st.button(
+                        "👁️ Preview",
+                        key=(
+                            "dashboard_ready_preview_"
+                            f"{product.id}"
+                        ),
+                        use_container_width=True,
+                    ):
+
+                        try:
+
+                            preview_path = publish_product(
+                                product.id,
+                                auto_deploy=False,
+                            )
+
+                            preview_html = (
+                                Path(
+                                    preview_path
+                                )
+                                .read_text(
+                                    encoding="utf-8"
+                                )
+                            )
+
+                            st.session_state[
+                                "dashboard_preview_product_id"
+                            ] = product.id
+
+                            st.session_state[
+                                "dashboard_preview_html"
+                            ] = preview_html
+
+                        except Exception as error:
+
+                            st.error(
+                                "Preview generation failed: "
+                                f"{error}"
+                            )
+
+
+                # ----------------------------------
+                # Publish
+                # ----------------------------------
+
+                with publish_col:
+
+                    if st.button(
+                        "🚀 Publish to Website",
+                        key=(
+                            "dashboard_publish_"
+                            f"{product.id}"
+                        ),
+                        type="primary",
+                        use_container_width=True,
+                    ):
+
+                        try:
+
+                            with st.spinner(
+                                "Publishing and deploying "
+                                "the article..."
+                            ):
+
+                                publish_product(
+                                    product.id,
+                                    auto_deploy=True,
+                                )
+
+                            st.success(
+                                "Article published successfully."
+                            )
+
+                            st.rerun()
+
+                        except Exception as error:
+
+                            st.error(
+                                "Publishing failed. "
+                                "The product was not marked "
+                                f"as published: {error}"
+                            )
+
+
+                # ----------------------------------
+                # Render preview
+                # ----------------------------------
+
+                if (
+                    st.session_state.get(
+                        "dashboard_preview_product_id"
+                    )
+                    == product.id
+                    and st.session_state.get(
+                        "dashboard_preview_html"
+                    )
+                ):
+
+                    st.divider()
+
+                    if st.button(
+                        "✖ Close Preview",
+                        key=(
+                            "dashboard_close_ready_preview_"
+                            f"{product.id}"
+                        ),
+                    ):
+
+                        st.session_state.pop(
+                            "dashboard_preview_product_id",
+                            None,
+                        )
+
+                        st.session_state.pop(
+                            "dashboard_preview_html",
+                            None,
+                        )
+
+                        st.rerun()
+
+
+                    components.html(
+                        st.session_state[
+                            "dashboard_preview_html"
+                        ],
+                        height=900,
+                        scrolling=True,
+                    )
+
+
+# ==================================================
+# TAB 4 — PUBLISHED
+# ==================================================
+
+with action_tab4:
+
+    if not published_products_dashboard:
+
+        st.info(
+            "No SourceScout articles have been "
+            "published yet."
+        )
+
+    else:
+
+        for product in published_products_dashboard:
+
+            with st.container(
+                border=True
+            ):
+
+                st.markdown(
+                    f"### {product.title}"
+                )
+
+                st.caption(
+                    f"{product.platform} "
+                    "• Status: published"
+                )
+
+
+                published_col1, published_col2 = (
+                    st.columns(2)
+                )
+
+
+                # ----------------------------------
+                # Preview published article
+                # ----------------------------------
+
+                with published_col1:
+
+                    if st.button(
+                        "👁️ Preview",
+                        key=(
+                            "dashboard_published_preview_"
+                            f"{product.id}"
+                        ),
+                        use_container_width=True,
+                    ):
+
+                        try:
+
+                            preview_path = publish_product(
+                                product.id,
+                                auto_deploy=False,
+                            )
+
+                            preview_html = (
+                                Path(
+                                    preview_path
+                                )
+                                .read_text(
+                                    encoding="utf-8"
+                                )
+                            )
+
+                            st.session_state[
+                                "dashboard_preview_product_id"
+                            ] = product.id
+
+                            st.session_state[
+                                "dashboard_preview_html"
+                            ] = preview_html
+
+                        except Exception as error:
+
+                            st.error(
+                                "Preview generation failed: "
+                                f"{error}"
+                            )
+
+
+                # ----------------------------------
+                # Open live article
+                # ----------------------------------
+
+                with published_col2:
+
+                    if product.slug:
+
+                        live_url = (
+                            "https://sourcescout.store/products/"
+                            f"{product.slug}.html"
+                        )
+
+                        st.link_button(
+                            "🌐 Open Live Article",
+                            live_url,
+                            use_container_width=True,
+                        )
+
+                    else:
+
+                        st.button(
+                            "🌐 Open Live Article",
+                            disabled=True,
+                            key=(
+                                "dashboard_no_live_url_"
+                                f"{product.id}"
+                            ),
+                            use_container_width=True,
+                        )
+
+
+                # ----------------------------------
+                # Render published preview
+                # ----------------------------------
+
+                if (
+                    st.session_state.get(
+                        "dashboard_preview_product_id"
+                    )
+                    == product.id
+                    and st.session_state.get(
+                        "dashboard_preview_html"
+                    )
+                ):
+
+                    st.divider()
+
+                    if st.button(
+                        "✖ Close Preview",
+                        key=(
+                            "dashboard_close_published_preview_"
+                            f"{product.id}"
+                        ),
+                    ):
+
+                        st.session_state.pop(
+                            "dashboard_preview_product_id",
+                            None,
+                        )
+
+                        st.session_state.pop(
+                            "dashboard_preview_html",
+                            None,
+                        )
+
+                        st.rerun()
+
+
+                    components.html(
+                        st.session_state[
+                            "dashboard_preview_html"
+                        ],
+                        height=900,
+                        scrolling=True,
+                    )
+
+
+st.divider()
+
+
+# --------------------------------------------------
+# Helper functions
+# --------------------------------------------------
+
+def get_publishing_data(product_id):
+    """
+    Load publishing fields directly from SQLite.
+
+    These fields were added through the publishing migration
+    and may not yet exist in the SQLAlchemy Product model.
+    """
+
+    conn = sqlite3.connect("data/scout.db")
+    conn.row_factory = sqlite3.Row
+
+    row = conn.execute(
+        """
+        SELECT
+            slug,
+            affiliate_url,
+            image_url,
+            article_title,
+            article_content,
+            publish_status,
+            published_at
+        FROM products
+        WHERE id = ?
+        """,
+        (product_id,),
+    ).fetchone()
+
+    conn.close()
+
+    if row is None:
+        return None
+
+    return dict(row)
+
+
+def update_publish_status(
+    product_id,
+    new_status,
+):
+    """
+    Update the publication status of a product.
+    """
+
+    conn = sqlite3.connect("data/scout.db")
+
+    conn.execute(
+        """
+        UPDATE products
+        SET publish_status = ?
+        WHERE id = ?
+        """,
+        (
+            new_status,
+            product_id,
+        ),
+    )
+
+    conn.commit()
+    conn.close()
+
+def get_public_product_url(slug):
+    if not slug:
+        return None
+
+    return (
+        "https://sourcescout.store/products/"
+        f"{slug}.html"
+    )
+
+# --------------------------------------------------
+# Load products
+# --------------------------------------------------
+
+products = (
+    db.query(Product)
+    .order_by(
+        Product.opportunity_score.desc()
+    )
+    .all()
+)
+
+
+if not products:
+
+    st.warning(
+        "No products found. "
+        "Run python seed_products.py first."
+    )
+
+    db.close()
+    st.stop()
+
+
+# --------------------------------------------------
+# Dashboard metrics
+# --------------------------------------------------
+
+total_products = len(products)
+
+
+analyzed_products = sum(
+    1
+    for product in products
+    if product.ai_analyzed_at is not None
+)
+
+
+high_potential = sum(
+    1
+    for product in products
+    if product.opportunity_score >= 80
+)
+
+
+col1, col2, col3 = st.columns(3)
+
+
+col1.metric(
+    "Products",
+    total_products,
+)
+
+
+col2.metric(
+    "High-Potential Finds",
+    high_potential,
+)
+
+
+col3.metric(
+    "Claude Analyzed",
+    analyzed_products,
+)
+
+
+st.divider()
+
+
+# --------------------------------------------------
+# Product selection
+# --------------------------------------------------
+
+st.subheader(
+    "🤖 Claude Product Analyst"
+)
+
+
+product_options = {
+    (
+        f"{product.title} "
+        f"— {product.platform}"
+    ): product.id
+    for product in products
+}
+
+
+selected_label = st.selectbox(
+    "Select a product",
+    options=list(
+        product_options.keys()
+    ),
+)
+
+
+selected_product_id = (
+    product_options[selected_label]
+)
+
+
+product = (
+    db.query(Product)
+    .filter(
+        Product.id
+        == selected_product_id
+    )
+    .first()
+)
+
+
+# --------------------------------------------------
+# Basic product information
+# --------------------------------------------------
+
+info1, info2, info3, info4 = (
+    st.columns(4)
+)
+
+
+info1.metric(
+    "Opportunity Score",
+    product.opportunity_score,
+)
+
+
+info2.metric(
+    "Price",
+    f"${product.price:,.2f}",
+)
+
+
+info3.metric(
+    "Orders",
+    f"{product.orders:,}",
+)
+
+
+info4.metric(
+    "Rating",
+    product.rating,
+)
+
+
+# --------------------------------------------------
+# Claude analysis
+# --------------------------------------------------
+
+st.write("")
+
+
+if product.ai_analyzed_at is None:
+
+    st.info(
+        "This product has not been "
+        "analyzed by Claude."
+    )
+
+
+    if st.button(
+        "🤖 Analyze with Claude",
+        type="primary",
+        key=f"analyze_{product.id}",
+    ):
+
+        with st.spinner(
+            "Claude is analyzing "
+            "the product..."
+        ):
+
+            try:
+
+                analyze_and_save_product(
+                    db,
+                    product,
+                )
+
+
+                st.success(
+                    "Analysis completed "
+                    "and saved to SQLite."
+                )
+
+
+                st.rerun()
+
+
+            except Exception as error:
+
+                st.error(
+                    "Claude analysis "
+                    f"failed: {error}"
+                )
+
+
+else:
+
+    st.success(
+        "Claude analysis is already saved."
+    )
+
+
+    if st.button(
+        "🔄 Re-analyze with Claude",
+        key=f"reanalyze_{product.id}",
+    ):
+
+        with st.spinner(
+            "Claude is re-analyzing "
+            "the product..."
+        ):
+
+            try:
+
+                analyze_and_save_product(
+                    db,
+                    product,
+                )
+
+
+                st.success(
+                    "New analysis saved."
+                )
+
+
+                st.rerun()
+
+
+            except Exception as error:
+
+                st.error(
+                    "Claude analysis "
+                    f"failed: {error}"
+                )
+
+
+# --------------------------------------------------
+# Display Claude analysis
+# --------------------------------------------------
+
+if product.ai_analyzed_at is not None:
+
+    st.divider()
+
+
+    st.subheader(
+        "🧠 Claude Analysis"
+    )
+
+
+    score_col, decision_col = (
+        st.columns(2)
+    )
+
+
+    score_col.metric(
+        "AI Score",
+        product.ai_score,
+    )
+
+
+    decision_col.metric(
+        "Decision",
+        product.ai_decision,
+    )
+
+
+    st.markdown(
+        "### 🎯 Target Audience"
+    )
+
+
+    st.write(
+        product.target_audience
+    )
+
+
+    st.markdown(
+        "### 📱 Content Potential"
+    )
+
+
+    st.write(
+        product.content_potential
+    )
+
+
+    st.markdown(
+        "### 💡 Best Content Angle"
+    )
+
+
+    st.write(
+        product.best_content_angle
+    )
+
+
+    st.markdown(
+        "### 💰 Why It Could Sell"
+    )
+
+
+    st.write(
+        product.why_it_could_sell
+    )
+
+
+    st.markdown(
+        "### ⚠️ Risks"
+    )
+
+
+    st.write(
+        product.risks
+    )
+
+
+    st.markdown(
+        "### 🔍 Verification Needed"
+    )
+
+
+    st.write(
+        product.verification_needed
+    )
+
+
+    st.caption(
+        f"API usage: "
+        f"{product.ai_input_tokens} "
+        f"input tokens + "
+        f"{product.ai_output_tokens} "
+        f"output tokens"
+    )
+
+
+# --------------------------------------------------
+# Product publishing pipeline
+# --------------------------------------------------
+
+if product.ai_analyzed_at is not None:
+
+    st.divider()
+
+
+    st.subheader(
+        "🚀 Product Publishing Pipeline"
+    )
+
+
+    publishing_data = (
+        get_publishing_data(
+            product.id
+        )
+    )
+
+
+    if publishing_data is None:
+
+        st.error(
+            "Publishing data could not "
+            "be loaded for this product."
+        )
+
+
+    else:
+
+        status = (
+            publishing_data.get(
+                "publish_status"
+            )
+            or "draft"
+        )
+
+
+        st.write(
+            f"**Publishing status:** "
+            f"`{status}`"
+        )
+
+
+        # ------------------------------------------
+        # Generate article
+        # ------------------------------------------
+
+        if not publishing_data.get(
+            "article_content"
+        ):
+
+            st.info(
+                "No SourceScout article "
+                "has been generated yet."
+            )
+
+
+            if st.button(
+                "✍️ Generate SourceScout Article",
+                type="primary",
+                key=(
+                    f"generate_article_"
+                    f"{product.id}"
+                ),
+            ):
+
+                with st.spinner(
+                    "Claude is creating "
+                    "the SourceScout article..."
+                ):
+
+                    try:
+
+                        result = (
+                            generate_and_save_article(
+                                product.id
+                            )
+                        )
+
+
+                        st.success(
+                            "Article generated "
+                            "and permanently "
+                            "saved to SQLite."
+                        )
+
+
+                        st.caption(
+                            f"API usage: "
+                            f"{result['usage']['input_tokens']} "
+                            f"input tokens / "
+                            f"{result['usage']['output_tokens']} "
+                            f"output tokens"
+                        )
+
+
+                        st.rerun()
+
+
+                    except Exception as error:
+
+                        st.error(
+                            "Article generation "
+                            f"failed: {error}"
+                        )
+
+
+        # ------------------------------------------
+        # Article preview
+        # ------------------------------------------
+
+        else:
+
+            try:
+
+                article = json.loads(
+                    publishing_data[
+                        "article_content"
+                    ]
+                )
+
+
+            except json.JSONDecodeError:
+
+                article = None
+
+
+                st.error(
+                    "The saved article content "
+                    "is not valid JSON."
+                )
+
+
+            if article:
+
+                st.markdown(
+                    "### 👀 Article Preview"
+                )
+
+
+                st.markdown(
+                    f"# "
+                    f"{publishing_data['article_title']}"
+                )
+
+
+                if article.get(
+                    "excerpt"
+                ):
+
+                    st.caption(
+                        article["excerpt"]
+                    )
+
+
+                st.markdown("---")
+
+
+                if article.get(
+                    "introduction"
+                ):
+
+                    st.write(
+                        article[
+                            "introduction"
+                        ]
+                    )
+
+
+                if article.get(
+                    "why_it_stands_out"
+                ):
+
+                    st.markdown(
+                        "### Why it stands out"
+                    )
+
+
+                    st.write(
+                        article[
+                            "why_it_stands_out"
+                        ]
+                    )
+
+
+                if article.get(
+                    "who_its_for"
+                ):
+
+                    st.markdown(
+                        "### Who it's for"
+                    )
+
+
+                    st.write(
+                        article[
+                            "who_its_for"
+                        ]
+                    )
+
+
+                if article.get(
+                    "things_to_consider"
+                ):
+
+                    st.markdown(
+                        "### Things to consider"
+                    )
+
+
+                    st.write(
+                        article[
+                            "things_to_consider"
+                        ]
+                    )
+
+
+                if article.get(
+                    "verdict"
+                ):
+
+                    st.markdown(
+                        "### SourceScout perspective"
+                    )
+
+
+                    st.write(
+                        article[
+                            "verdict"
+                        ]
+                    )
+
+
+                st.markdown("---")
+
+
+                st.caption(
+                    "Review all product claims "
+                    "before approving this article."
+                )
+
+
+                # ----------------------------------
+                # Approval workflow
+                # ----------------------------------
+
+                if status in (
+                    "draft",
+                    "content_generated",
+                ):
+
+                    st.warning(
+                        "This article has not "
+                        "been approved for "
+                        "public publication."
+                    )
+
+
+                    if st.button(
+                        "✅ Approve for Publishing",
+                        type="primary",
+                        key=(
+                            f"approve_article_"
+                            f"{product.id}"
+                        ),
+                    ):
+
+                        update_publish_status(
+                            product.id,
+                            "approved",
+                        )
+
+
+                        st.success(
+                            "Article approved "
+                            "for publishing."
+                        )
+
+
+                        st.rerun()
+
+
+                elif status == "approved":
+
+                    st.success(
+                        "✅ This article is approved and ready "
+                        "to publish to the SourceScout website."
+                    )
+
+                    if st.button(
+                        "🚀 Publish to Website",
+                        type="primary",
+                        key=f"publish_website_{product.id}",
+                    ):
+
+                        with st.spinner(
+                            "Publishing article, updating the website "
+                            "and deploying to Cloudflare..."
+                        ):
+
+                            try:
+
+                                publish_product(
+                                    product.id
+                                )
+
+                                update_publish_status(
+                                    product.id,
+                                    "published",
+                                )
+
+                                st.success(
+                                    "🎉 Article published successfully!"
+                                )
+
+                                st.rerun()
+
+                            except Exception as error:
+
+                                st.error(
+                                    f"Publishing failed: {error}"
+                                )
+
+
+                elif status == "published":
+
+                    st.success(
+                        "🌐 This article is marked as published."
+                    )
+
+
+# --------------------------------------------------
+# All product opportunities
+# --------------------------------------------------
+
+st.divider()
+
+
+st.subheader(
+    "🔥 All Product Opportunities"
+)
+
+
+data = []
+
+
+for item in products:
+
+    item_publishing = (
+        get_publishing_data(
+            item.id
+        )
+    )
+
+
+    publish_status = (
+        item_publishing.get(
+            "publish_status"
+        )
+        if item_publishing
+        else None
+    )
+
+
+    data.append(
+        {
+            "Platform": item.platform,
+            "Product": item.title,
+            "Category": item.category,
+            "Price": item.price,
+            "Orders": item.orders,
+            "Rating": item.rating,
+            "Algorithm Score": (
+                item.opportunity_score
+            ),
+            "AI Score": item.ai_score,
+            "AI Decision": (
+                item.ai_decision
+            ),
+            "Scout Status": (
+                item.status
+            ),
+            "Publishing Status": (
+                publish_status
+            ),
+        }
+    )
+
+
+df = pd.DataFrame(
+    data
+)
+
+
+st.dataframe(
+    df,
+    use_container_width=True,
+    hide_index=True,
+)
+
+
+# --------------------------------------------------
+# Close database session
+# --------------------------------------------------
+
+db.close()
+
+
+# --------------------------------------------------
+# Product Discovery & Import
+# --------------------------------------------------
+
+st.divider()
+
+st.subheader("🔎 Product Discovery & Import")
+
+st.caption(
+    "Import real marketplace products into the "
+    "SourceScout discovery database."
+)
+
+
+with st.expander(
+    "➕ Import a Product",
+    expanded=False,
+):
+
+    with st.form(
+        "manual_product_import"
+    ):
+
+        import_platform = st.selectbox(
+            "Marketplace",
+            [
+                "Alibaba",
+                "AliExpress",
+                "Taobao",
+                "Temu",
+                "Shopee",
+                "Other",
+            ],
+        )
+
+        import_product_id = st.text_input(
+            "Marketplace Product ID"
+        )
+
+        import_title = st.text_input(
+            "Product Title"
+        )
+
+        import_category = st.text_input(
+            "Category"
+        )
+
+
+        col1, col2 = st.columns(2)
+
+        with col1:
+
+            import_price = st.number_input(
+                "Current Price ($)",
+                min_value=0.0,
+                value=0.0,
+                step=1.0,
+            )
+
+        with col2:
+
+            import_original_price = st.number_input(
+                "Original Price ($)",
+                min_value=0.0,
+                value=0.0,
+                step=1.0,
+            )
+
+
+        col3, col4 = st.columns(2)
+
+        with col3:
+
+            import_orders = st.number_input(
+                "Orders",
+                min_value=0,
+                value=0,
+                step=1,
+            )
+
+        with col4:
+
+            import_rating = st.number_input(
+                "Rating",
+                min_value=0.0,
+                max_value=5.0,
+                value=0.0,
+                step=0.1,
+            )
+
+
+        col5, col6 = st.columns(2)
+
+        with col5:
+
+            import_supplier_score = st.number_input(
+                "Supplier Score",
+                min_value=0.0,
+                max_value=100.0,
+                value=0.0,
+                step=1.0,
+            )
+
+        with col6:
+
+            import_commission_rate = st.number_input(
+                "Commission Rate (%)",
+                min_value=0.0,
+                value=0.0,
+                step=0.5,
+            )
+
+
+        import_product_url = st.text_input(
+            "Original Product URL"
+        )
+
+        import_affiliate_url = st.text_input(
+            "Affiliate URL (optional)"
+        )
+
+        import_image_url = st.text_input(
+            "Product Image URL (optional)"
+        )
+
+
+        submitted = st.form_submit_button(
+            "🚀 Import Product",
+            type="primary",
+        )
+
+
+        if submitted:
+
+            try:
+
+                product_data = {
+
+                    "platform":
+                        import_platform,
+
+                    "product_id":
+                        import_product_id,
+
+                    "title":
+                        import_title,
+
+                    "category":
+                        import_category,
+
+                    "price":
+                        import_price,
+
+                    "original_price":
+                        import_original_price,
+
+                    "orders":
+                        import_orders,
+
+                    "rating":
+                        import_rating,
+
+                    "supplier_score":
+                        import_supplier_score,
+
+                    "commission_rate":
+                        import_commission_rate,
+
+                    "product_url":
+                        import_product_url,
+
+                    "affiliate_url":
+                        import_affiliate_url,
+
+                    "image_url":
+                        import_image_url,
+                }
+
+
+                result = ingest_product(
+                    product_data
+                )
+
+
+                if result["action"] == "created":
+
+                    st.success(
+                        "✅ New product imported successfully."
+                    )
+
+                else:
+
+                    st.success(
+                        "🔄 Existing product updated successfully."
+                    )
+
+
+                st.write(
+                    f"**Product:** {result['title']}"
+                )
+
+                st.write(
+                    f"**Opportunity Score:** "
+                    f"{result['opportunity_score']}"
+                )
+
+
+                st.rerun()
+
+
+            except Exception as error:
+
+                st.error(
+                    f"Product import failed: {error}"
+                )
+
+
+# --------------------------------------------------
+# AI Analysis Shortlist
+# --------------------------------------------------
+
+st.divider()
+
+st.subheader(
+    "🧠 AI Analysis Shortlist"
+)
+
+st.caption(
+    "Automatically shortlist high-potential products "
+    "for Claude analysis based on their opportunity score."
+)
+
+
+# Configurable shortlist threshold
+
+shortlist_threshold = st.slider(
+    "Minimum Opportunity Score",
+    min_value=0,
+    max_value=100,
+    value=60,
+    step=5,
+    key="ai_shortlist_threshold",
+)
+
+
+# Maximum products allowed in one Claude batch
+
+batch_limit = st.number_input(
+    "Maximum products per Claude batch",
+    min_value=1,
+    max_value=10,
+    value=5,
+    step=1,
+    key="ai_shortlist_batch_limit",
+)
+
+
+try:
+
+    shortlisted_products = (
+        get_shortlisted_products(
+            threshold=shortlist_threshold,
+            only_unanalyzed=True,
+        )
+    )
+
+
+    if not shortlisted_products:
+
+        st.info(
+            "No unanalyzed products currently meet "
+            f"the {shortlist_threshold}-point threshold."
+        )
+
+
+    else:
+
+        st.success(
+            f"{len(shortlisted_products)} product(s) "
+            "qualify for Claude analysis."
+        )
+
+
+        selected_shortlist_products = []
+
+
+        for shortlist_product in shortlisted_products:
+
+            with st.container(
+                border=True
+            ):
+
+                select_for_ai = st.checkbox(
+                    "Select for Claude analysis",
+                    key=(
+                        "shortlist_ai_"
+                        f"{shortlist_product.id}"
+                    ),
+                )
+
+
+                title_column, score_column = (
+                    st.columns(
+                        [4, 1]
+                    )
+                )
+
+
+                with title_column:
+
+                    st.markdown(
+                        f"### {shortlist_product.title}"
+                    )
+
+                    st.caption(
+                        f"{shortlist_product.platform} "
+                        f"• ${shortlist_product.price:,.2f} "
+                        f"• {shortlist_product.orders:,} orders "
+                        f"• Rating {shortlist_product.rating}"
+                    )
+
+
+                    if getattr(
+                        shortlist_product,
+                        "supplier",
+                        None,
+                    ):
+
+                        st.write(
+                            "**Supplier:** "
+                            f"{shortlist_product.supplier}"
+                        )
+
+
+                    if getattr(
+                        shortlist_product,
+                        "moq",
+                        None,
+                    ):
+
+                        st.write(
+                            "**MOQ:** "
+                            f"{shortlist_product.moq}"
+                        )
+
+
+                with score_column:
+
+                    st.metric(
+                        "Opportunity Score",
+                        shortlist_product.opportunity_score,
+                    )
+
+
+                if select_for_ai:
+
+                    selected_shortlist_products.append(
+                        shortlist_product
+                    )
+
+
+        # ------------------------------------------
+        # Claude batch analysis
+        # ------------------------------------------
+
+        if selected_shortlist_products:
+
+            selected_count = len(
+                selected_shortlist_products
+            )
+
+
+            if selected_count > batch_limit:
+
+                st.warning(
+                    f"You selected {selected_count} products, "
+                    f"but the current batch limit is {batch_limit}. "
+                    "Reduce the selection or increase the batch limit."
+                )
+
+
+            else:
+
+                st.info(
+                    f"{selected_count} product(s) selected "
+                    "for Claude analysis."
+                )
+
+
+                if st.button(
+                    "🤖 Analyze Selected with Claude",
+                    type="primary",
+                    key="analyze_shortlisted_products",
+                ):
+
+                    completed = 0
+                    failed = 0
+
+                    progress_bar = st.progress(
+                        0
+                    )
+
+                    status_message = st.empty()
+
+
+                    for index, shortlist_product in enumerate(
+                        selected_shortlist_products,
+                        start=1,
+                    ):
+
+                        status_message.write(
+                            "Analyzing "
+                            f"{index}/{selected_count}: "
+                            f"{shortlist_product.title}"
+                        )
+
+
+                        try:
+
+                            # Use the main application
+                            # database session.
+
+                            current_product = (
+                                db.query(Product)
+                                .filter(
+                                    Product.id
+                                    == shortlist_product.id
+                                )
+                                .first()
+                            )
+
+
+                            if current_product:
+
+                                analyze_and_save_product(
+                                    db,
+                                    current_product,
+                                )
+
+                                completed += 1
+
+
+                        except Exception as error:
+
+                            failed += 1
+
+                            st.error(
+                                "Claude analysis failed for "
+                                f"{shortlist_product.title}: "
+                                f"{error}"
+                            )
+
+
+                        progress_bar.progress(
+                            index / selected_count
+                        )
+
+
+                    status_message.empty()
+
+
+                    if completed:
+
+                        st.success(
+                            f"✅ {completed} product(s) "
+                            "analyzed successfully."
+                        )
+
+
+                    if failed:
+
+                        st.warning(
+                            f"⚠️ {failed} product(s) failed."
+                        )
+
+
+                    st.rerun()
+
+
+except Exception as error:
+
+    st.error(
+        f"Could not load AI shortlist: {error}"
+    )
+
+
+# --------------------------------------------------
+# Article Generation Queue
+# --------------------------------------------------
+
+st.divider()
+
+st.subheader(
+    "✍️ Article Generation Queue"
+)
+
+st.caption(
+    "Products approved by Claude automatically appear "
+    "here for article generation. REVIEW products remain "
+    "pending and REJECT products are excluded."
+)
+
+
+try:
+
+    article_queue = get_article_queue()
+
+    review_queue = get_review_queue()
+
+
+    published_count = (
+        db.query(Product)
+        .filter(
+            Product.publish_status == "published"
+        )
+        .count()
+    )
+
+
+    queue_col1, queue_col2, queue_col3 = (
+        st.columns(3)
+    )
+
+
+    queue_col1.metric(
+        "Ready for Articles",
+        len(article_queue),
+    )
+
+
+    queue_col2.metric(
+        "Pending Manual Review",
+        len(review_queue),
+    )
+
+
+    queue_col3.metric(
+        "Already Published",
+        published_count,
+    )
+
+
+    # ----------------------------------------------
+    # Approved products
+    # ----------------------------------------------
+
+    if not article_queue:
+
+        st.info(
+            "No Claude-approved products are currently "
+            "waiting for article generation."
+        )
+
+
+    else:
+
+        selected_article_products = []
+
+
+        for queue_product in article_queue:
+
+            with st.container(
+                border=True
+            ):
+
+                selected_for_article = st.checkbox(
+                    "Select for article generation",
+                    key=(
+                        "article_queue_"
+                        f"{queue_product.id}"
+                    ),
+                )
+
+
+                title_col, ai_col = st.columns(
+                    [4, 1]
+                )
+
+
+                with title_col:
+
+                    st.markdown(
+                        f"### {queue_product.title}"
+                    )
+
+                    st.caption(
+                        f"{queue_product.platform} "
+                        f"• Opportunity Score "
+                        f"{queue_product.opportunity_score}"
+                    )
+
+
+                    if getattr(
+                        queue_product,
+                        "supplier",
+                        None,
+                    ):
+
+                        st.write(
+                            "**Supplier:** "
+                            f"{queue_product.supplier}"
+                        )
+
+
+                with ai_col:
+
+                    st.metric(
+                        "Claude Score",
+                        queue_product.ai_score,
+                    )
+
+                    st.success(
+                        "APPROVE"
+                    )
+
+
+                if selected_for_article:
+
+                    selected_article_products.append(
+                        queue_product
+                    )
+
+
+        # ------------------------------------------
+        # Generate selected articles
+        # ------------------------------------------
+
+        if selected_article_products:
+
+            if st.button(
+                "✍️ Generate Selected Articles",
+                type="primary",
+                key="generate_article_queue",
+            ):
+
+                total = len(
+                    selected_article_products
+                )
+
+                completed = 0
+                failed = 0
+
+                progress_bar = st.progress(
+                    0
+                )
+
+                status_message = st.empty()
+
+
+                for index, queue_product in enumerate(
+                    selected_article_products,
+                    start=1,
+                ):
+
+                    status_message.write(
+                        f"Generating article {index}/{total}: "
+                        f"{queue_product.title}"
+                    )
+
+
+                    try:
+
+                        current_product = (
+                            db.query(Product)
+                            .filter(
+                                Product.id
+                                == queue_product.id
+                            )
+                            .first()
+                        )
+
+
+                        if current_product:
+
+                            generate_and_save_article(
+                                current_product.id
+                            )
+
+                            completed += 1
+
+
+                    except Exception as error:
+
+                        failed += 1
+
+                        st.error(
+                            "Article generation failed for "
+                            f"{queue_product.title}: "
+                            f"{error}"
+                        )
+
+
+                    progress_bar.progress(
+                        index / total
+                    )
+
+
+                status_message.empty()
+
+
+                if completed:
+
+                    st.success(
+                        f"✅ {completed} article(s) generated "
+                        "and saved to SQLite."
+                    )
+
+
+                if failed:
+
+                    st.warning(
+                        f"⚠️ {failed} article(s) failed."
+                    )
+
+
+                st.rerun()
+
+
+    # ----------------------------------------------
+    # Articles ready for publishing
+    # ----------------------------------------------
+
+    ready_to_publish_products = (
+        db.query(Product)
+        .filter(
+            Product.article_content.isnot(None),
+            Product.article_content != "",
+            Product.publish_status == "ready",
+        )
+        .order_by(
+            Product.id.desc()
+        )
+        .all()
+    )
+
+
+    if ready_to_publish_products:
+
+        st.markdown(
+            "### 📦 Articles Ready for Publishing"
+        )
+
+        st.caption(
+            "Generated articles waiting for final preview, "
+            "affiliate-link verification and publication."
+        )
+
+
+        for ready_product in ready_to_publish_products:
+
+            with st.container(
+                border=True
+            ):
+
+                ready_col1, ready_col2 = st.columns(
+                    [4, 1]
+                )
+
+
+                with ready_col1:
+
+                    st.markdown(
+                        f"### {ready_product.title}"
+                    )
+
+                    if getattr(
+                        ready_product,
+                        "article_title",
+                        None,
+                    ):
+
+                        st.write(
+                            "**Article:** "
+                            f"{ready_product.article_title}"
+                        )
+
+                    st.caption(
+                        f"{ready_product.platform} "
+                        f"• Status: Ready for publishing"
+                    )
+
+
+                with ready_col2:
+
+                    st.metric(
+                        "Opportunity Score",
+                        ready_product.opportunity_score,
+                    )
+
+
+                # ----------------------------------
+                # Affiliate-link status
+                # ----------------------------------
+
+                has_affiliate_url = bool(
+                    getattr(
+                        ready_product,
+                        "affiliate_url",
+                        None,
+                    )
+                    and ready_product.affiliate_url.strip()
+                )
+
+
+                if has_affiliate_url:
+
+                    st.success(
+                        "🔗 Affiliate link ready"
+                    )
+
+                else:
+
+                    st.warning(
+                        "⚠️ Affiliate link missing. "
+                        "Preview is available, but production "
+                        "publishing is blocked."
+                    )
+
+
+                # ----------------------------------
+                # Preview and publish controls
+                # ----------------------------------
+
+                preview_col, publish_col = (
+                    st.columns(2)
+                )
+
+
+                with preview_col:
+
+                    if st.button(
+                        "👁️ Preview Article",
+                        key=(
+                            "ready_preview_"
+                            f"{ready_product.id}"
+                        ),
+                        use_container_width=True,
+                    ):
+
+                        try:
+
+                            with st.spinner(
+                                "Generating isolated preview..."
+                            ):
+
+                                preview_path = (
+                                    publish_product(
+                                        ready_product.id,
+                                        auto_deploy=False,
+                                    )
+                                )
+
+
+                            preview_html = (
+                                Path(
+                                    preview_path
+                                ).read_text(
+                                    encoding="utf-8"
+                                )
+                            )
+
+
+                            st.session_state[
+                                "ready_preview_product_id"
+                            ] = ready_product.id
+
+                            st.session_state[
+                                "ready_preview_html"
+                            ] = preview_html
+
+                            st.session_state[
+                                "ready_preview_path"
+                            ] = str(
+                                preview_path
+                            )
+
+
+                        except Exception as error:
+
+                            st.error(
+                                "Preview generation failed: "
+                                f"{error}"
+                            )
+
+
+                with publish_col:
+
+                    if st.button(
+                        "🚀 Publish to Website",
+                        type="primary",
+                        key=(
+                            "publish_ready_"
+                            f"{ready_product.id}"
+                        ),
+                        disabled=not has_affiliate_url,
+                        use_container_width=True,
+                    ):
+
+                        try:
+
+                            with st.spinner(
+                                "Publishing article "
+                                "to the website..."
+                            ):
+
+                                publish_product(
+                                    ready_product.id,
+                                    auto_deploy=True,
+                                )
+
+
+                            st.success(
+                                "Article published successfully."
+                            )
+
+                            st.rerun()
+
+
+                        except Exception as error:
+
+                            st.error(
+                                "Publishing failed: "
+                                f"{error}"
+                            )
+
+
+                # ----------------------------------
+                # Embedded preview
+                # ----------------------------------
+
+                if (
+                    st.session_state.get(
+                        "ready_preview_product_id"
+                    )
+                    == ready_product.id
+                ):
+
+                    st.success(
+                        "Isolated website preview generated."
+                    )
+
+                    st.caption(
+                        st.session_state.get(
+                            "ready_preview_path",
+                            "",
+                        )
+                    )
+
+
+                    if st.button(
+                        "✖️ Close Preview",
+                        key=(
+                            "close_ready_preview_"
+                            f"{ready_product.id}"
+                        ),
+                    ):
+
+                        st.session_state.pop(
+                            "ready_preview_product_id",
+                            None,
+                        )
+
+                        st.session_state.pop(
+                            "ready_preview_html",
+                            None,
+                        )
+
+                        st.session_state.pop(
+                            "ready_preview_path",
+                            None,
+                        )
+
+                        st.rerun()
+
+
+                    components.html(
+                        st.session_state[
+                            "ready_preview_html"
+                        ],
+                        height=900,
+                        scrolling=True,
+                    )
+
+
+        st.divider()
+
+
+    # ----------------------------------------------
+    # Published products preview
+    # ----------------------------------------------
+
+    published_products = (
+        db.query(Product)
+        .filter(
+            Product.publish_status
+            == "published"
+        )
+        .order_by(
+            Product.id.desc()
+        )
+        .all()
+    )
+
+
+    if published_products:
+
+        with st.expander(
+            f"🌐 Already Published "
+            f"({len(published_products)})"
+        ):
+
+            for published_product in (
+                published_products
+            ):
+
+                with st.container(
+                    border=True
+                ):
+
+                    published_title_col, published_score_col = (
+                        st.columns(
+                            [4, 1]
+                        )
+                    )
+
+
+                    with published_title_col:
+
+                        st.markdown(
+                            f"### {published_product.title}"
+                        )
+
+                        st.caption(
+                            f"{published_product.platform} "
+                            f"• Publishing status: published"
+                        )
+
+
+                    with published_score_col:
+
+                        st.metric(
+                            "Opportunity Score",
+                            published_product.opportunity_score,
+                        )
+
+
+                    if st.button(
+                        "👁️ Preview Website Article",
+                        key=(
+                            "queue_preview_published_"
+                            f"{published_product.id}"
+                        ),
+                        use_container_width=True,
+                    ):
+
+                        try:
+
+                            with st.spinner(
+                                "Generating isolated preview..."
+                            ):
+
+                                preview_path = (
+                                    publish_product(
+                                        published_product.id,
+                                        auto_deploy=False,
+                                    )
+                                )
+
+
+                            preview_html = (
+                                Path(
+                                    preview_path
+                                ).read_text(
+                                    encoding="utf-8"
+                                )
+                            )
+
+
+                            st.session_state[
+                                "queue_preview_product_id"
+                            ] = published_product.id
+
+                            st.session_state[
+                                "queue_preview_html"
+                            ] = preview_html
+
+                            st.session_state[
+                                "queue_preview_path"
+                            ] = str(
+                                preview_path
+                            )
+
+
+                        except Exception as error:
+
+                            st.error(
+                                "Preview generation failed: "
+                                f"{error}"
+                            )
+
+
+                    if (
+                        st.session_state.get(
+                            "queue_preview_product_id"
+                        )
+                        == published_product.id
+                    ):
+
+                        st.success(
+                            "Isolated website preview generated."
+                        )
+
+                        st.caption(
+                            st.session_state.get(
+                                "queue_preview_path",
+                                "",
+                            )
+                        )
+
+
+                        if st.button(
+                            "✖️ Close Preview",
+                            key=(
+                                "close_queue_preview_"
+                                f"{published_product.id}"
+                            ),
+                        ):
+
+                            st.session_state.pop(
+                                "queue_preview_product_id",
+                                None,
+                            )
+
+                            st.session_state.pop(
+                                "queue_preview_html",
+                                None,
+                            )
+
+                            st.session_state.pop(
+                                "queue_preview_path",
+                                None,
+                            )
+
+                            st.rerun()
+
+
+                        components.html(
+                            st.session_state[
+                                "queue_preview_html"
+                            ],
+                            height=900,
+                            scrolling=True,
+                        )
+
+
+    # ----------------------------------------------
+    # Manual review queue
+    # ----------------------------------------------
+
+    if review_queue:
+
+        with st.expander(
+            f"🟡 Pending Manual Review "
+            f"({len(review_queue)})"
+        ):
+
+            for review_product in review_queue:
+
+                with st.container(
+                    border=True
+                ):
+
+                    st.markdown(
+                        f"### {review_product.title}"
+                    )
+
+                    review_col1, review_col2 = (
+                        st.columns(2)
+                    )
+
+                    review_col1.metric(
+                        "Claude Score",
+                        review_product.ai_score,
+                    )
+
+                    review_col2.metric(
+                        "Opportunity Score",
+                        review_product.opportunity_score,
+                    )
+
+                    st.write(
+                        "**Claude Decision:** REVIEW"
+                    )
+
+                    if getattr(
+                        review_product,
+                        "supplier",
+                        None,
+                    ):
+
+                        st.write(
+                            "**Supplier:** "
+                            f"{review_product.supplier}"
+                        )
+
+                    button_col1, button_col2 = (
+                        st.columns(2)
+                    )
+
+                    with button_col1:
+
+                        if st.button(
+                            "✅ Approve for Article Generation",
+                            type="primary",
+                            key=(
+                                "editorial_approve_"
+                                f"{review_product.id}"
+                            ),
+                            use_container_width=True,
+                        ):
+
+                            current_product = (
+                                db.query(Product)
+                                .filter(
+                                    Product.id
+                                    == review_product.id
+                                )
+                                .first()
+                            )
+
+                            if current_product:
+
+                                current_product.editorial_decision = (
+                                    "APPROVE"
+                                )
+
+                                db.commit()
+
+                                st.success(
+                                    "Product approved for "
+                                    "article generation."
+                                )
+
+                                st.rerun()
+
+                    with button_col2:
+
+                        if st.button(
+                            "❌ Reject Product",
+                            key=(
+                                "editorial_reject_"
+                                f"{review_product.id}"
+                            ),
+                            use_container_width=True,
+                        ):
+
+                            current_product = (
+                                db.query(Product)
+                                .filter(
+                                    Product.id
+                                    == review_product.id
+                                )
+                                .first()
+                            )
+
+                            if current_product:
+
+                                current_product.editorial_decision = (
+                                    "REJECT"
+                                )
+
+                                db.commit()
+
+                                st.success(
+                                    "Product rejected by "
+                                    "editorial review."
+                                )
+
+                                st.rerun()
+
+
+except Exception as error:
+
+    st.error(
+        f"Could not load article queue: {error}"
+    )
+
+
+# --------------------------------------------------
+# Affiliate Link Manager
+# --------------------------------------------------
+
+st.divider()
+
+st.subheader(
+    "🔗 Affiliate Link Manager"
+)
+
+st.caption(
+    "Add affiliate tracking URLs without replacing "
+    "the original marketplace product links."
+)
+
+
+try:
+
+    missing_affiliate_products = list(
+        get_products_missing_affiliate_links()
+    )
+
+    # Products waiting for publication come first.
+    missing_affiliate_products.sort(
+        key=lambda product: (
+            0
+            if product.publish_status == "ready"
+            else 1,
+            -(product.opportunity_score or 0),
+        )
+    )
+
+
+    if not missing_affiliate_products:
+
+        st.success(
+            "All article-ready products currently "
+            "have affiliate links."
+        )
+
+
+    else:
+
+        st.warning(
+            f"{len(missing_affiliate_products)} "
+            "product(s) are missing affiliate links."
+        )
+
+
+        for affiliate_product in (
+            missing_affiliate_products
+        ):
+
+            with st.container(
+                border=True
+            ):
+
+                st.markdown(
+                    f"### {affiliate_product.title}"
+                )
+
+
+                if affiliate_product.publish_status == "ready":
+
+                    st.warning(
+                        "📦 Ready for Publishing — "
+                        "add the affiliate link to "
+                        "unlock publication."
+                    )
+
+                else:
+
+                    st.caption(
+                        "Publishing status: "
+                        f"{affiliate_product.publish_status or 'draft'}"
+                    )
+
+
+                if affiliate_product.product_url:
+
+                    st.link_button(
+                        "🔗 Open Original Product",
+                        affiliate_product.product_url,
+                    )
+
+
+                affiliate_input = st.text_input(
+                    "Affiliate Tracking URL",
+                    key=(
+                        "affiliate_url_input_"
+                        f"{affiliate_product.id}"
+                    ),
+                    placeholder=(
+                        "Paste the affiliate tracking "
+                        "link here"
+                    ),
+                )
+
+
+                if st.button(
+                    "💾 Save Affiliate Link",
+                    key=(
+                        "save_affiliate_"
+                        f"{affiliate_product.id}"
+                    ),
+                ):
+
+                    try:
+
+                        save_affiliate_url(
+                            affiliate_product.id,
+                            affiliate_input,
+                        )
+
+
+                        st.success(
+                            "Affiliate link saved."
+                        )
+
+
+                        st.rerun()
+
+
+                    except Exception as error:
+
+                        st.error(
+                            f"Could not save link: "
+                            f"{error}"
+                        )
+
+
+except Exception as error:
+
+    st.error(
+        "Could not load affiliate link manager: "
+        f"{error}"
+    )
+
+
+# --------------------------------------------------
+# Automatic Marketplace Discovery
+# --------------------------------------------------
+
+st.divider()
+
+st.subheader(
+    "🌐 Automatic Marketplace Discovery"
+)
+
+st.caption(
+    "Search connected marketplaces, review products "
+    "and import selected opportunities into SourceScout."
+)
+
+
+discovery_col1, discovery_col2 = st.columns(
+    [2, 1]
+)
+
+
+with discovery_col1:
+
+    discovery_keyword = st.text_input(
+        "Product keyword",
+        placeholder=(
+            "Example: portable solar generator"
+        ),
+        key="discovery_keyword",
+    )
+
+
+with discovery_col2:
+
+    discovery_marketplace = st.selectbox(
+        "Marketplace",
+        [
+            "Alibaba",
+        ],
+        key="discovery_marketplace",
+    )
+
+
+discovery_limit = st.slider(
+    "Maximum results",
+    min_value=5,
+    max_value=50,
+    value=20,
+    step=5,
+)
+
+
+if "discovery_results" not in st.session_state:
+
+    st.session_state[
+        "discovery_results"
+    ] = []
+
+
+if st.button(
+    "🔍 Discover Products",
+    type="primary",
+):
+
+    try:
+
+        with st.spinner(
+            f"Searching {discovery_marketplace}..."
+        ):
+
+            results = discover_products(
+
+                marketplace=
+                    discovery_marketplace,
+
+                keyword=
+                    discovery_keyword,
+
+                limit=
+                    discovery_limit,
+
+            )
+
+
+        st.session_state[
+            "discovery_results"
+        ] = results
+
+
+        if results:
+
+            st.success(
+                f"Found {len(results)} products."
+            )
+
+        else:
+
+            st.info(
+                "The discovery connector is ready, "
+                "but the live Alibaba product API has "
+                "not been connected yet."
+            )
+
+
+    except Exception as error:
+
+        st.error(
+            f"Discovery failed: {error}"
+        )
+
+
+# --------------------------------------------------
+# Display discovery results
+# --------------------------------------------------
+
+discovery_results = st.session_state[
+    "discovery_results"
+]
+
+
+if discovery_results:
+
+    st.markdown(
+        "### Discovery Results"
+    )
+
+
+    selected_products = []
+
+
+    for index, item in enumerate(
+        discovery_results
+    ):
+
+        with st.container(
+            border=True
+        ):
+
+            # ------------------------------------------
+            # Product data
+            # ------------------------------------------
+
+            product_id = item.get(
+                "product_id",
+                ""
+            )
+
+            title = item.get(
+                "title",
+                "Untitled Product",
+            )
+
+            image_url = item.get(
+                "image_url",
+                ""
+            )
+
+            supplier = item.get(
+                "supplier",
+                ""
+            ) or "Supplier not available"
+
+            moq = item.get(
+                "moq",
+                ""
+            ) or "Not specified"
+
+            product_url = item.get(
+                "product_url",
+                ""
+            )
+
+            price = item.get(
+                "price",
+                0,
+            ) or 0
+
+            orders = item.get(
+                "orders",
+                0,
+            ) or 0
+
+            rating = item.get(
+                "rating",
+                0,
+            ) or 0
+
+
+            # ------------------------------------------
+            # Selection checkbox
+            # ------------------------------------------
+
+            select_product = st.checkbox(
+                "Select for import",
+                key=(
+                    f"discover_select_{index}_"
+                    f"{product_id}"
+                ),
+            )
+
+
+            # ------------------------------------------
+            # Main product layout
+            # ------------------------------------------
+
+            image_column, details_column = (
+                st.columns(
+                    [1, 3]
+                )
+            )
+
+
+            # ------------------------------------------
+            # Product image
+            # ------------------------------------------
+
+            with image_column:
+
+                if image_url:
+
+                    st.image(
+                        image_url,
+                        use_container_width=True,
+                    )
+
+                else:
+
+                    st.info(
+                        "No product image"
+                    )
+
+
+            # ------------------------------------------
+            # Product information
+            # ------------------------------------------
+
+            with details_column:
+
+                st.markdown(
+                    f"### {title}"
+                )
+
+
+                st.markdown(
+                    f"**Supplier:** {supplier}"
+                )
+
+
+                st.markdown(
+                    f"**Minimum Order:** {moq}"
+                )
+
+
+                if product_url:
+
+                    st.link_button(
+                        "🔗 View Product on Alibaba",
+                        product_url,
+                    )
+
+
+            # ------------------------------------------
+            # Product metrics
+            # ------------------------------------------
+
+            (
+                price_column,
+                orders_column,
+                rating_column,
+                moq_column,
+            ) = st.columns(4)
+
+
+            price_column.metric(
+                "Starting Price",
+                f"${price:,.2f}",
+            )
+
+
+            orders_column.metric(
+                "Orders",
+                f"{orders:,}",
+            )
+
+
+            rating_column.metric(
+                "Rating",
+                f"{rating}/5",
+            )
+
+
+            moq_column.metric(
+                "MOQ",
+                str(moq),
+            )
+
+
+            # ------------------------------------------
+            # Price context warning
+            # ------------------------------------------
+
+            if price <= 1:
+
+                st.caption(
+                    "⚠️ Alibaba prices may represent "
+                    "a unit, component, watt, sample, "
+                    "or volume-based starting price. "
+                    "Check the listing before scoring "
+                    "this product."
+                )
+
+
+            if select_product:
+
+                selected_products.append(
+                    item
+                )
+
+
+    if selected_products:
+
+        if st.button(
+            "📥 Import Selected Products",
+            type="primary",
+        ):
+
+            try:
+
+                with st.spinner(
+                    "Importing selected products..."
+                ):
+
+                    import_result = (
+                        ingest_products(
+                            selected_products
+                        )
+                    )
+
+
+                st.success(
+                    "Product import completed."
+                )
+
+
+                metric1, metric2, metric3 = (
+                    st.columns(3)
+                )
+
+
+                metric1.metric(
+                    "Created",
+                    import_result[
+                        "created"
+                    ],
+                )
+
+
+                metric2.metric(
+                    "Updated",
+                    import_result[
+                        "updated"
+                    ],
+                )
+
+
+                metric3.metric(
+                    "Failed",
+                    import_result[
+                        "failed"
+                    ],
+                )
+
+
+            except Exception as error:
+
+                st.error(
+                    f"Import failed: {error}"
+                )

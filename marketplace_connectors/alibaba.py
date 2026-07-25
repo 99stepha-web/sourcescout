@@ -1,0 +1,388 @@
+import os
+from typing import Any
+
+import requests
+from dotenv import load_dotenv
+
+
+load_dotenv()
+
+
+class AlibabaConnector:
+    """
+    Live Alibaba product discovery connector using Piloterr.
+
+    The connector returns normalized product dictionaries so the rest
+    of SourceScout does not depend on the external provider's response
+    format.
+    """
+
+    def __init__(self):
+        self.api_key = os.getenv("PILOTERR_API_KEY")
+
+        if not self.api_key:
+            raise ValueError(
+                "PILOTERR_API_KEY was not found in the .env file."
+            )
+
+        self.base_url = "https://api.piloterr.com/v2/alibaba/search"
+
+    def search(
+        self,
+        keyword: str,
+        max_results: int = 20,
+    ) -> list[dict[str, Any]]:
+
+        keyword = keyword.strip()
+
+        if not keyword:
+            raise ValueError(
+                "A product keyword is required."
+            )
+
+        headers = {
+            "x-api-key": self.api_key,
+            "Content-Type": "application/json",
+        }
+
+        params = {
+            "query": keyword,
+        }
+
+        response = requests.get(
+            self.base_url,
+            headers=headers,
+            params=params,
+            timeout=30,
+        )
+
+        if response.status_code != 200:
+            raise RuntimeError(
+                "Alibaba discovery API failed.\n"
+                f"Status: {response.status_code}\n"
+                f"Response: {response.text[:500]}"
+            )
+
+        data = response.json()
+
+        raw_products = self._extract_products(data)
+
+        normalized_products = []
+
+        for item in raw_products[:max_results]:
+
+            product = self._normalize_product(item)
+
+            if product["title"]:
+                normalized_products.append(product)
+
+        return normalized_products
+
+    @staticmethod
+    def _extract_products(
+        data: Any,
+    ) -> list[dict]:
+
+        if isinstance(data, list):
+            return data
+
+        if not isinstance(data, dict):
+            return []
+
+        possible_keys = (
+            "products",
+            "items",
+            "results",
+            "data",
+        )
+
+        for key in possible_keys:
+
+            value = data.get(key)
+
+            if isinstance(value, list):
+                return value
+
+            if isinstance(value, dict):
+
+                for nested_key in (
+                    "products",
+                    "items",
+                    "results",
+                ):
+
+                    nested_value = value.get(
+                        nested_key
+                    )
+
+                    if isinstance(
+                        nested_value,
+                        list,
+                    ):
+                        return nested_value
+
+        return []
+
+    @staticmethod
+    def _first_value(
+        item: dict,
+        *keys,
+        default=None,
+    ):
+
+        for key in keys:
+
+            value = item.get(key)
+
+            if value not in (
+                None,
+                "",
+                [],
+                {},
+            ):
+                return value
+
+        return default
+
+    def _normalize_product(
+        self,
+        item: dict,
+    ) -> dict[str, Any]:
+
+        product_id = self._first_value(
+            item,
+            "product_id",
+            "productId",
+            "id",
+            "item_id",
+            "itemId",
+            default="",
+        )
+
+        title = self._first_value(
+            item,
+            "title",
+            "product_title",
+            "productTitle",
+            "name",
+            default="",
+        )
+
+        product_url = self._first_value(
+            item,
+            "listing_url",
+            "url",
+            "product_url",
+            "productUrl",
+            "link",
+            default="",
+        )
+
+        image_url = self._first_value(
+            item,
+            "image",
+            "image_url",
+            "imageUrl",
+            "thumbnail",
+            default="",
+        )
+
+        price = self._extract_number(
+            self._first_value(
+                item,
+                "price_min",
+                "price",
+                "min_price",
+                "minPrice",
+                default=0,
+            )
+        )
+
+        original_price = self._extract_number(
+            self._first_value(
+                item,
+                "original_price",
+                "originalPrice",
+                "max_price",
+                "maxPrice",
+                default=price,
+            )
+        )
+
+        orders = self._extract_integer(
+            self._first_value(
+                item,
+                "sold_count",
+                "orders",
+                "sold",
+                "sales",
+                "order_count",
+                default=0,
+            )
+        )
+
+        rating = self._extract_number(
+            self._first_value(
+                item,
+                "rating",
+                "score",
+                "stars",
+                default=0,
+            )
+        )
+
+        supplier = self._first_value(
+            item,
+            "seller_name",
+            "supplier",
+            "supplier_name",
+            "supplierName",
+            "company",
+            "seller",
+            default="",
+        )
+
+        moq = self._first_value(
+            item,
+            "min_order",
+            "moq",
+            "minimum_order",
+            "minimumOrder",
+            default="",
+        )
+
+        price_min = self._extract_number(
+            self._first_value(
+                item,
+                "price_min",
+                "min_price",
+                "minPrice",
+                default=price,
+            )
+        )
+
+        price_max = self._extract_number(
+            self._first_value(
+                item,
+                "price_max",
+                "max_price",
+                "maxPrice",
+                default=price_min,
+            )
+        )
+
+        price_text = self._first_value(
+            item,
+            "price_text",
+            "priceText",
+            "formatted_price",
+            "formattedPrice",
+            default="",
+        )
+
+        review_count = self._extract_integer(
+            self._first_value(
+                item,
+                "review_count",
+                "reviewCount",
+                "reviews",
+                "reviews_count",
+                default=0,
+            )
+        )
+
+        return {
+            "platform": "Alibaba",
+            "marketplace_product_id": str(
+                product_id
+            ),
+            "product_id": str(
+                product_id
+            ),
+            "title": str(title),
+            "category": "Uncategorized",
+            "price": price,
+            "original_price": original_price,
+            "price_min": price_min,
+            "price_max": price_max,
+            "price_text": str(price_text),
+            "orders": orders,
+            "rating": rating,
+            "review_count": review_count,
+            "supplier": str(supplier),
+            "supplier_score": 0,
+            "commission_rate": 0,
+            "product_url": str(product_url),
+            "affiliate_url": "",
+            "image_url": str(image_url),
+            "moq": moq,
+        }
+
+    @staticmethod
+    def _extract_number(
+        value,
+    ) -> float:
+
+        if isinstance(
+            value,
+            (int, float),
+        ):
+            return float(value)
+
+        if value is None:
+            return 0.0
+
+        import re
+
+        match = re.search(
+            r"\d+(?:\.\d+)?",
+            str(value).replace(",", ""),
+        )
+
+        if not match:
+            return 0.0
+
+        return float(
+            match.group()
+        )
+
+    @staticmethod
+    def _extract_integer(
+        value,
+    ) -> int:
+
+        if isinstance(
+            value,
+            (int, float),
+        ):
+            return int(value)
+
+        if value is None:
+            return 0
+
+        import re
+
+        match = re.search(
+            r"\d+",
+            str(value).replace(",", ""),
+        )
+
+        if not match:
+            return 0
+
+        return int(
+            match.group()
+        )
+
+
+def discover_alibaba_products(
+    keyword: str,
+    max_results: int = 20,
+):
+
+    connector = AlibabaConnector()
+
+    return connector.search(
+        keyword=keyword,
+        max_results=max_results,
+    )

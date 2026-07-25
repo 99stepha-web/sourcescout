@@ -1,0 +1,292 @@
+"""
+SourceScout Content Opportunity Scoring V1.
+
+This score estimates whether a product is worth creating
+affiliate/editorial content about.
+
+It does NOT replace the commercial opportunity_score.
+
+Maximum score: 100
+"""
+
+
+def clean_text(value):
+    return str(
+        value or ""
+    ).strip().lower()
+
+
+def calculate_content_opportunity_score(product):
+    """
+    Calculate Content Opportunity Score.
+
+    Factors:
+    - Existing commercial opportunity: 25 points
+    - Buyer/research intent: 25 points
+    - Content expansion potential: 20 points
+    - Evergreen potential: 15 points
+    - Social/discovery potential: 15 points
+    """
+
+    score = 0.0
+
+    title = clean_text(
+        getattr(
+            product,
+            "title",
+            "",
+        )
+    )
+
+    category = clean_text(
+        getattr(
+            product,
+            "category",
+            "",
+        )
+    )
+
+    opportunity_score = float(
+        getattr(
+            product,
+            "opportunity_score",
+            0,
+        )
+        or 0
+    )
+
+    text = (
+        title
+        + " "
+        + category
+    )
+
+
+    # ----------------------------------------------
+    # 1. Commercial foundation — maximum 25
+    # ----------------------------------------------
+
+    score += min(
+        25,
+        opportunity_score * 0.25,
+    )
+
+
+    # ----------------------------------------------
+    # 2. Buyer / research intent — maximum 25
+    #
+    # Products with meaningful specifications,
+    # comparisons or purchase considerations tend
+    # to support stronger buying-research content.
+    # ----------------------------------------------
+
+    research_terms = (
+        "solar",
+        "power station",
+        "generator",
+        "projector",
+        "camera",
+        "laptop",
+        "computer",
+        "tablet",
+        "smart",
+        "wireless",
+        "portable",
+        "electric",
+        "machine",
+        "equipment",
+        "charger",
+        "battery",
+        "inverter",
+        "printer",
+        "vacuum",
+        "robot",
+        "tool",
+    )
+
+    research_matches = sum(
+        1
+        for term in research_terms
+        if term in text
+    )
+
+    if research_matches >= 3:
+        score += 25
+
+    elif research_matches == 2:
+        score += 21
+
+    elif research_matches == 1:
+        score += 15
+
+    else:
+        score += 8
+
+
+    # ----------------------------------------------
+    # 3. Content expansion potential — maximum 20
+    #
+    # Can this product naturally support reviews,
+    # comparisons, guides and recommendation pages?
+    # ----------------------------------------------
+
+    expansion_terms = (
+        "solar",
+        "generator",
+        "projector",
+        "camera",
+        "smart",
+        "portable",
+        "electric",
+        "wireless",
+        "machine",
+        "equipment",
+        "home",
+        "outdoor",
+        "travel",
+        "fashion",
+        "jacket",
+        "bag",
+        "beauty",
+        "kitchen",
+        "fitness",
+    )
+
+    expansion_matches = sum(
+        1
+        for term in expansion_terms
+        if term in text
+    )
+
+    if expansion_matches >= 3:
+        score += 20
+
+    elif expansion_matches == 2:
+        score += 17
+
+    elif expansion_matches == 1:
+        score += 13
+
+    else:
+        score += 7
+
+
+    # ----------------------------------------------
+    # 4. Evergreen potential — maximum 15
+    # ----------------------------------------------
+
+    short_lived_terms = (
+        "2024",
+        "2025",
+        "2026",
+        "limited edition",
+        "seasonal",
+        "christmas",
+        "halloween",
+        "valentine",
+    )
+
+    if any(
+        term in text
+        for term in short_lived_terms
+    ):
+        score += 6
+
+    else:
+        score += 15
+
+
+    # ----------------------------------------------
+    # 5. Social/discovery potential — maximum 15
+    # ----------------------------------------------
+
+    visual_terms = (
+        "fashion",
+        "jacket",
+        "bag",
+        "beauty",
+        "home",
+        "decor",
+        "smart",
+        "portable",
+        "projector",
+        "camera",
+        "outdoor",
+        "travel",
+        "fitness",
+        "kitchen",
+        "mini",
+    )
+
+    visual_matches = sum(
+        1
+        for term in visual_terms
+        if term in text
+    )
+
+    if visual_matches >= 3:
+        score += 15
+
+    elif visual_matches == 2:
+        score += 12
+
+    elif visual_matches == 1:
+        score += 8
+
+    else:
+        score += 4
+
+
+    return round(
+        min(
+            score,
+            100,
+        ),
+        2,
+    )
+
+
+def get_content_opportunity_level(score):
+
+    if score >= 80:
+        return "HIGH"
+
+    if score >= 60:
+        return "MEDIUM"
+
+    return "LOW"
+
+
+def calculate_combined_priority_score(
+    opportunity_score,
+    content_opportunity_score,
+):
+    """
+    Combined SourceScout priority.
+
+    Commercial opportunity: 60%
+    Content opportunity: 40%
+    """
+
+    opportunity_score = float(
+        opportunity_score
+        or 0
+    )
+
+    content_opportunity_score = float(
+        content_opportunity_score
+        or 0
+    )
+
+    return round(
+        (
+            opportunity_score
+            * 0.60
+        )
+        +
+        (
+            content_opportunity_score
+            * 0.40
+        ),
+        2,
+    )
