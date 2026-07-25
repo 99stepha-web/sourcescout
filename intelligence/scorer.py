@@ -1,12 +1,7 @@
 """
-SourceScout Product Intelligence Scoring Engine
+SourceScout Product Scorer
 
-This module converts raw marketplace product metrics into normalized
-scores that can be consumed by the AI pipeline.
-
-Every score ranges from 0-100.
-
-The overall score is a weighted average.
+Aggregates analyzer results into a final intelligence score.
 
 Author: SourceScout
 """
@@ -14,188 +9,89 @@ Author: SourceScout
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional
+
+from intelligence.analyzer import AnalyzerResult
+from intelligence.report import AnalyzerResults
 
 
-# ---------------------------------------------------------
-# Product Metrics
-# ---------------------------------------------------------
-
-@dataclass
-class ProductMetrics:
-    """
-    Raw marketplace metrics collected from Alibaba/Taobao.
-    """
-
-    monthly_sales: int = 0
-    rating: float = 0.0
-    review_count: int = 0
-    seller_rating: float = 0.0
-    seller_years: int = 0
-    price: float = 0.0
-    original_price: Optional[float] = None
-
-
-# ---------------------------------------------------------
-# Score Result
-# ---------------------------------------------------------
-
-@dataclass
+@dataclass(slots=True)
 class ScoreResult:
-    trend_score: float
-    competition_score: float
-    supplier_score: float
-    pricing_score: float
-    profitability_score: float
+    """
+    Final aggregated score.
+    """
+
     overall_score: float
 
+    decision: str
 
-# ---------------------------------------------------------
-# Product Scorer
-# ---------------------------------------------------------
+    confidence: float
+
 
 class ProductScorer:
+    """
+    Aggregates analyzer results.
 
-    def __init__(
+    This class contains no marketplace-specific logic.
+    """
+
+    TREND_WEIGHT = 0.30
+    COMPETITION_WEIGHT = 0.20
+    SUPPLIER_WEIGHT = 0.20
+    PRICING_WEIGHT = 0.15
+    PROFITABILITY_WEIGHT = 0.15
+
+    def score(
         self,
-        trend_weight: float = 0.25,
-        competition_weight: float = 0.20,
-        supplier_weight: float = 0.20,
-        pricing_weight: float = 0.15,
-        profitability_weight: float = 0.20,
-    ):
-
-        total = (
-            trend_weight
-            + competition_weight
-            + supplier_weight
-            + pricing_weight
-            + profitability_weight
-        )
-
-        if abs(total - 1.0) > 0.0001:
-            raise ValueError("Weights must total 1.0")
-
-        self.trend_weight = trend_weight
-        self.competition_weight = competition_weight
-        self.supplier_weight = supplier_weight
-        self.pricing_weight = pricing_weight
-        self.profitability_weight = profitability_weight
-
-    # -------------------------------------------------
-
-    def score(self, metrics: ProductMetrics) -> ScoreResult:
-
-        trend = self._trend(metrics)
-
-        competition = self._competition(metrics)
-
-        supplier = self._supplier(metrics)
-
-        pricing = self._pricing(metrics)
-
-        profitability = self._profitability(metrics)
+        results: AnalyzerResults,
+    ) -> ScoreResult:
 
         overall = (
-            trend * self.trend_weight
-            + competition * self.competition_weight
-            + supplier * self.supplier_weight
-            + pricing * self.pricing_weight
-            + profitability * self.profitability_weight
+            results.trend.score * self.TREND_WEIGHT
+            + results.competition.score * self.COMPETITION_WEIGHT
+            + results.supplier.score * self.SUPPLIER_WEIGHT
+            + results.pricing.score * self.PRICING_WEIGHT
+            + results.profitability.score * self.PROFITABILITY_WEIGHT
         )
+
+        confidence = self._confidence(results)
+
+        decision = self._decision(overall)
 
         return ScoreResult(
-            trend_score=round(trend, 2),
-            competition_score=round(competition, 2),
-            supplier_score=round(supplier, 2),
-            pricing_score=round(pricing, 2),
-            profitability_score=round(profitability, 2),
             overall_score=round(overall, 2),
+            decision=decision,
+            confidence=round(confidence, 2),
         )
 
-    # -------------------------------------------------
-    # Individual Scores
-    # -------------------------------------------------
-
-    def _trend(self, m: ProductMetrics) -> float:
+    @staticmethod
+    def _confidence(results: AnalyzerResults) -> float:
         """
-        Sales + reviews indicate demand.
+        Average confidence across all analyzers.
         """
 
-        sales = min(m.monthly_sales / 10000, 1.0)
+        confidences = [
+            results.trend.confidence,
+            results.competition.confidence,
+            results.supplier.confidence,
+            results.pricing.confidence,
+            results.profitability.confidence,
+        ]
 
-        reviews = min(m.review_count / 3000, 1.0)
+        return sum(confidences) / len(confidences)
 
-        score = (sales * 0.70 + reviews * 0.30) * 100
-
-        return score
-
-    # -------------------------------------------------
-
-    def _competition(self, m: ProductMetrics) -> float:
+    @staticmethod
+    def _decision(score: float) -> str:
         """
-        Higher review count generally means stronger competition.
-
-        Fewer reviews receive a higher score.
-        """
-
-        review_factor = min(m.review_count / 5000, 1.0)
-
-        return (1.0 - review_factor) * 100
-
-    # -------------------------------------------------
-
-    def _supplier(self, m: ProductMetrics) -> float:
-        """
-        Seller reputation.
+        Translate overall score into a recommendation.
         """
 
-        rating = min(m.seller_rating / 5.0, 1.0)
+        if score >= 85:
+            return "STRONG_BUY"
 
-        years = min(m.seller_years / 10, 1.0)
+        if score >= 70:
+            return "BUY"
 
-        return (rating * 0.70 + years * 0.30) * 100
+        if score >= 55:
+            return "REVIEW"
 
-    # -------------------------------------------------
-
-    def _pricing(self, m: ProductMetrics) -> float:
-        """
-        Discount percentage.
-
-        Larger discount often improves attractiveness.
-        """
-
-        if (
-            m.original_price is None
-            or m.original_price <= 0
-            or m.original_price <= m.price
-        ):
-            return 50.0
-
-        discount = (m.original_price - m.price) / m.original_price
-
-        return min(discount * 150, 100)
-
-    # -------------------------------------------------
-
-    def _profitability(self, m: ProductMetrics) -> float:
-        """
-        Placeholder profitability estimate.
-
-        Will later use shipping, taxes,
-        marketplace fees and advertising costs.
-        """
-
-        if m.price <= 0:
-            return 0
-
-        if m.price < 5:
-            return 35
-
-        if m.price < 15:
-            return 60
-
-        if m.price < 40:
-            return 80
-
-        return 95
+        return "REJECT"
