@@ -1,7 +1,9 @@
 """
 Trend Analyzer
 
-Evaluates market demand based on sales and reviews.
+Evaluates product demand based on market sales and reviews.
+
+Author: SourceScout
 """
 
 from __future__ import annotations
@@ -12,19 +14,25 @@ from intelligence.analyzer import (
     AnalyzerResult,
     BaseAnalyzer,
 )
-
 from intelligence.models import IntelligenceContext
 
 
 class TrendAnalyzer(BaseAnalyzer):
+    """
+    Analyze overall market demand.
+    """
 
     NAME = "trend"
 
     @staticmethod
     def _band_score(value: int, bands: list[tuple[int, int]]) -> float:
+        """
+        Convert a raw value into a calibrated score.
+        """
         for limit, score in bands:
             if value <= limit:
                 return float(score)
+
         return 100.0
 
     def analyze(
@@ -51,8 +59,7 @@ class TrendAnalyzer(BaseAnalyzer):
 
         return self.result(
             score=score,
-            confidence=score / 100,
-            summary=self.level(score),
+            summary="Market demand evaluated from sales and reviews.",
             details={
                 "marketplace": context.marketplace,
                 "monthly_sales": context.market.monthly_sales,
