@@ -89,13 +89,37 @@ Algorithmic Opportunity Score: {product.opportunity_score}
 
     raw_response = response.content[0].text.strip()
 
-    # Handle accidental Markdown JSON fences
+    print("\n========== CLAUDE RAW RESPONSE ==========\n")
+    print(raw_response)
+    print("\n=========================================\n")
+
+    # Remove Markdown code fences if Claude returned them
     if raw_response.startswith("```"):
         raw_response = raw_response.replace("```json", "")
         raw_response = raw_response.replace("```", "")
         raw_response = raw_response.strip()
 
-    analysis = json.loads(raw_response)
+    # Extract the JSON object even if Claude adds text before/after it
+    start = raw_response.find("{")
+    end = raw_response.rfind("}")
+
+    if start == -1 or end == -1:
+        raise ValueError(
+            "Claude did not return a valid JSON object.\n\n"
+            f"Response:\n{raw_response}"
+        )
+
+    json_text = raw_response[start:end + 1]
+
+    try:
+        analysis = json.loads(json_text)
+    except json.JSONDecodeError as e:
+        print("\n===== JSON PARSE ERROR =====")
+        print(e)
+        print("\n===== JSON RECEIVED =====")
+        print(json_text)
+        print("===========================\n")
+        raise
 
     return {
         "analysis": analysis,
