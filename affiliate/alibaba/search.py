@@ -31,7 +31,33 @@ class AlibabaSearch:
 
             page = context.new_page()
 
-            page.goto(url, wait_until="domcontentloaded")
+            import json
+
+            def log_response(response):
+                try:
+                    if "application/json" in response.headers.get(
+                        "content-type", ""
+                    ):
+                        print("\nJSON:", response.url)
+
+                        data = response.json()
+
+                        if isinstance(data, dict):
+                            print(
+                                json.dumps(
+                                    data,
+                                    ensure_ascii=False,
+                                )[:1000]
+                            )
+                except Exception:
+                    pass
+
+            page.on("response", log_response)
+
+            page.goto(
+                url,
+                wait_until="domcontentloaded",
+            )
 
             print(
                 "\nLog in to Alibaba if requested."
