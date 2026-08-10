@@ -48,3 +48,5 @@ data/*.db
 # Temporary files
 *.tmp
 *.swp
+google_credentials.json
+google_token.json

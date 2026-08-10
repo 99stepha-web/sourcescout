@@ -1,1880 +1,1614 @@
+from homepage_seo import main as generate_homepage_seo
+from seo_metadata import enhance_all as enhance_seo_metadata
+from seo_generator import generate as generate_seo_files
+from catalog_enhancer import enhance
 import html
 import json
 import re
+import sqlite3
 import subprocess
-import sys
+from affiliate.utils.url_utils import clean_affiliate_url
 from pathlib import Path
-from datetime import datetime, timezone
-from urllib.parse import quote
-
-from database import SessionLocal
-from models import Product
 
 
-# ==================================================
-# CONFIGURATION
-# ==================================================
-
-WEBSITE_ROOT = Path("/Users/pro/product-finds-website")
-PRODUCTS_DIR = WEBSITE_ROOT / "products"
-
-PRODUCTS_PAGE = WEBSITE_ROOT / "products.html"
-SITEMAP_FILE = WEBSITE_ROOT / "sitemap.xml"
-
-SITE_URL = "https://sourcescout.store"
-
-PRODUCTS_START_MARKER = "<!-- AUTO-PRODUCTS-START -->"
-PRODUCTS_END_MARKER = "<!-- AUTO-PRODUCTS-END -->"
+DB_PATH = Path("data/scout.db")
+SITE = Path.home() / "product-finds-website"
+PRODUCTS_DIR = SITE / "products"
 
 
-# ==================================================
-# BASIC HELPERS
-# ==================================================
+def clean_affiliate_url(value):
+    """
+    Return ONLY the real Taobao affiliate URL.
 
-def escape(value):
-    """Safely escape text for HTML."""
+    Accepts:
+        https://m.tb.cn/h.xxxxx
 
-    if value is None:
-        return ""
+    Also accepts:
+        [https://m.tb.cn/h.xxxxx](https://m.tb.cn/h.xxxxx)
+    """
 
-    return html.escape(
-        str(value),
+    value = str(value or "").strip()
+
+    # First extract the URL from anywhere inside the value.
+    match = re.search(
+        r"https://(?:m\.tb\.cn|s\.click\.taobao\.com)/[A-Za-z0-9._~:/?#\[\]@!$&'*+,;=%-]+",
+        value,
+    )
+
+    if not match:
+        raise ValueError(
+            f"Invalid Taobao affiliate URL: {value}"
+        )
+
+    url = match.group(0)
+
+    # Remove any trailing Markdown characters.
+    url = url.rstrip(")]}>,\"'")
+
+    return url
+
+
+def get_ready_products():
+
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+
+    rows = conn.execute(
+        """
+        SELECT
+            id,
+            title,
+            slug,
+            article_title,
+            article_content,
+            affiliate_url,
+            image_url,
+            price,
+            platform
+        FROM products
+        WHERE article_content IS NOT NULL
+          AND article_content != ''
+          AND slug IS NOT NULL
+          AND slug != ''
+          AND affiliate_url IS NOT NULL
+          AND affiliate_url != ''
+        ORDER BY id ASC
+        """
+    ).fetchall()
+
+    conn.close()
+
+    return rows
+
+
+def build_article_html(product):
+
+    article = json.loads(
+        product["article_content"]
+    )
+
+    title = html.escape(
+        article.get(
+            "article_title",
+            product["title"],
+        )
+    )
+
+    excerpt = html.escape(
+        article.get("excerpt", "")
+    )
+
+    introduction = html.escape(
+        article.get("introduction", "")
+    )
+
+    why_it_stands_out = html.escape(
+        article.get(
+            "why_it_stands_out",
+            "",
+        )
+    ).replace(
+        "\n\n",
+        "</p><p>",
+    )
+
+    who_its_for = html.escape(
+        article.get(
+            "who_its_for",
+            "",
+        )
+    )
+
+    things_to_consider = html.escape(
+        article.get(
+            "things_to_consider",
+            "",
+        )
+    )
+
+    verdict = html.escape(
+        article.get("verdict", "")
+    )
+
+    # CRITICAL:
+    # Always clean the URL immediately before writing HTML.
+    raw_affiliate_url = product["affiliate_url"]
+
+    affiliate_url = clean_affiliate_url(
+        raw_affiliate_url
+    )
+
+    affiliate_url = html.escape(
+        affiliate_url,
         quote=True,
     )
 
-
-def format_price(value):
-    """Format price safely."""
-
-    if value is None:
-        return "N/A"
-
-    try:
-        return f"${float(value):,.2f}"
-
-    except (TypeError, ValueError):
-        return escape(value)
-
-
-def humanize_key(key):
-    """Convert JSON field names into headings."""
-
-    return (
-        str(key)
-        .replace("_", " ")
-        .strip()
-        .title()
+    product_title = html.escape(
+        product["title"]
     )
 
-
-def clean_text(value):
-    """Normalize text for summaries and metadata."""
-
-    if not value:
-        return ""
-
-    return re.sub(
-        r"\s+",
-        " ",
-        str(value),
-    ).strip()
-
-
-def truncate(value, length=180):
-    """Safely shorten text."""
-
-    value = clean_text(value)
-
-    if len(value) <= length:
-        return value
-
-    return (
-        value[:length]
-        .rsplit(" ", 1)[0]
-        + "..."
+    image_url = html.escape(
+        product["image_url"] or "",
+        quote=True,
     )
 
-
-# ==================================================
-# ARTICLE CONTENT PARSING
-# ==================================================
-
-def strip_json_fences(content):
-    """Remove accidental ```json code fences."""
-
-    if not content:
-        return ""
-
-    content = str(content).strip()
-
-    if content.startswith("```"):
-
-        content = re.sub(
-            r"^```(?:json)?\s*",
-            "",
-            content,
-            flags=re.IGNORECASE,
-        )
-
-        content = re.sub(
-            r"\s*```$",
-            "",
-            content,
-        )
-
-    return content.strip()
-
-
-def parse_article_json(content):
-    """
-    Attempt to parse stored article content as JSON.
-
-    Returns dictionary or None.
-    """
-
-    if not content:
-        return None
-
-    content = strip_json_fences(
-        content
+    price = html.escape(
+        str(product["price"] or "")
     )
-
-    try:
-
-        parsed = json.loads(
-            content
-        )
-
-        if isinstance(parsed, dict):
-            return parsed
-
-    except (
-        json.JSONDecodeError,
-        TypeError,
-    ):
-
-        pass
-
-    return None
-
-
-# ==================================================
-# MARKDOWN / TEXT TO HTML
-# ==================================================
-
-def markdown_to_html(content):
-    """
-    Convert basic generated Markdown/plain text
-    into safe HTML.
-    """
-
-    if not content:
-        return ""
-
-    lines = str(content).splitlines()
-
-    output = []
-    paragraph = []
-    in_list = False
-
-
-    def close_list():
-
-        nonlocal in_list
-
-        if in_list:
-
-            output.append(
-                "</ul>"
-            )
-
-            in_list = False
-
-
-    def flush_paragraph():
-
-        nonlocal paragraph
-
-        if not paragraph:
-            return
-
-        text = " ".join(
-            line.strip()
-            for line in paragraph
-            if line.strip()
-        )
-
-        if text:
-
-            output.append(
-                f"<p>{escape(text)}</p>"
-            )
-
-        paragraph = []
-
-
-    for raw_line in lines:
-
-        line = raw_line.strip()
-
-        if not line:
-
-            flush_paragraph()
-            close_list()
-
-            continue
-
-
-        if line.startswith("### "):
-
-            flush_paragraph()
-            close_list()
-
-            output.append(
-                f"<h3>{escape(line[4:])}</h3>"
-            )
-
-
-        elif line.startswith("## "):
-
-            flush_paragraph()
-            close_list()
-
-            output.append(
-                f"<h2>{escape(line[3:])}</h2>"
-            )
-
-
-        elif line.startswith("# "):
-
-            flush_paragraph()
-            close_list()
-
-            output.append(
-                f"<h2>{escape(line[2:])}</h2>"
-            )
-
-
-        elif line.startswith("- "):
-
-            flush_paragraph()
-
-            if not in_list:
-
-                output.append(
-                    "<ul>"
-                )
-
-                in_list = True
-
-            output.append(
-                f"<li>{escape(line[2:])}</li>"
-            )
-
-
-        else:
-
-            paragraph.append(
-                line
-            )
-
-
-    flush_paragraph()
-    close_list()
-
-    return "\n".join(
-        output
-    )
-
-
-# ==================================================
-# JSON ARTICLE RENDERING
-# ==================================================
-
-SKIPPED_ARTICLE_KEYS = {
-    "article_title",
-    "title",
-    "slug",
-}
-
-
-def render_json_value(key, value):
-    """Render one JSON field into HTML."""
-
-    if value is None:
-        return ""
-
-
-    # ----------------------------------------------
-    # LIST
-    # ----------------------------------------------
-
-    if isinstance(value, list):
-
-        if not value:
-            return ""
-
-        output = [
-            f"<h2>{escape(humanize_key(key))}</h2>",
-            "<ul>",
-        ]
-
-        for item in value:
-
-            if isinstance(item, dict):
-
-                item_text = " — ".join(
-                    f"{humanize_key(k)}: {v}"
-                    for k, v in item.items()
-                    if v is not None
-                )
-
-                output.append(
-                    f"<li>{escape(item_text)}</li>"
-                )
-
-            else:
-
-                output.append(
-                    f"<li>{escape(item)}</li>"
-                )
-
-        output.append(
-            "</ul>"
-        )
-
-        return "\n".join(
-            output
-        )
-
-
-    # ----------------------------------------------
-    # DICTIONARY
-    # ----------------------------------------------
-
-    if isinstance(value, dict):
-
-        output = [
-            f"<h2>{escape(humanize_key(key))}</h2>"
-        ]
-
-        for sub_key, sub_value in value.items():
-
-            if sub_value is None:
-                continue
-
-            output.append(
-                f"<h3>{escape(humanize_key(sub_key))}</h3>"
-            )
-
-            if isinstance(
-                sub_value,
-                list,
-            ):
-
-                output.append(
-                    "<ul>"
-                )
-
-                for item in sub_value:
-
-                    output.append(
-                        f"<li>{escape(item)}</li>"
-                    )
-
-                output.append(
-                    "</ul>"
-                )
-
-            else:
-
-                output.append(
-                    markdown_to_html(
-                        str(sub_value)
-                    )
-                )
-
-        return "\n".join(
-            output
-        )
-
-
-    # ----------------------------------------------
-    # TEXT
-    # ----------------------------------------------
-
-    text = str(
-        value
-    ).strip()
-
-    if not text:
-        return ""
-
-
-    if key == "excerpt":
-
-        return f"""
-        <p class="article-excerpt">
-            {escape(text)}
-        </p>
-        """
-
-
-    if key == "introduction":
-
-        return markdown_to_html(
-            text
-        )
-
-
-    return (
-        f"<h2>{escape(humanize_key(key))}</h2>\n"
-        + markdown_to_html(text)
-    )
-
-
-def json_article_to_html(data):
-    """Convert structured article JSON to HTML."""
-
-    output = []
-
-    for key, value in data.items():
-
-        if key in SKIPPED_ARTICLE_KEYS:
-            continue
-
-        rendered = render_json_value(
-            key,
-            value,
-        )
-
-        if rendered:
-
-            output.append(
-                rendered
-            )
-
-    return "\n".join(
-        output
-    )
-
-
-def article_to_html(content):
-    """
-    Detect JSON or normal text automatically.
-    """
-
-    if not content:
-        return ""
-
-    parsed = parse_article_json(
-        content
-    )
-
-    if parsed:
-
-        return json_article_to_html(
-            parsed
-        )
-
-    return markdown_to_html(
-        content
-    )
-
-
-# ==================================================
-# ARTICLE METADATA
-# ==================================================
-
-def get_article_data(product):
-    """Extract article title and excerpt."""
-
-    title = (
-        product.article_title
-        or product.title
-    )
-
-    excerpt = ""
-
-    parsed = parse_article_json(
-        product.article_content
-    )
-
-    if parsed:
-
-        title = (
-            parsed.get(
-                "article_title"
-            )
-            or parsed.get(
-                "title"
-            )
-            or title
-        )
-
-        excerpt = (
-            parsed.get(
-                "excerpt"
-            )
-            or parsed.get(
-                "summary"
-            )
-            or ""
-        )
-
-    return (
-        title,
-        excerpt,
-    )
-
-
-# ==================================================
-# PRODUCT FACTS
-# ==================================================
-
-def build_product_facts(product):
-
-    facts = []
-
-    if product.platform:
-
-        facts.append(
-            (
-                "Marketplace",
-                product.platform,
-            )
-        )
-
-
-    if product.price is not None:
-
-        facts.append(
-            (
-                "Price",
-                format_price(
-                    product.price
-                ),
-            )
-        )
-
-
-    if product.orders:
-
-        facts.append(
-            (
-                "Orders",
-                f"{product.orders:,}",
-            )
-        )
-
-
-    if product.rating:
-
-        facts.append(
-            (
-                "Rating",
-                f"{product.rating}/5",
-            )
-        )
-
-
-    if not facts:
-
-        return ""
-
-
-    cards = ""
-
-
-    for label, value in facts:
-
-        cards += f"""
-        <div class="fact-item">
-
-            <span class="fact-label">
-                {escape(label)}
-            </span>
-
-            <strong>
-                {escape(value)}
-            </strong>
-
-        </div>
-        """
-
-
-    return f"""
-    <div class="product-facts">
-
-        {cards}
-
-    </div>
-    """
-
-
-# ==================================================
-# BUILD ARTICLE PAGE
-# ==================================================
-
-def build_article_page(product):
-
-    article_title, excerpt = (
-        get_article_data(
-            product
-        )
-    )
-
-
-    article_content = article_to_html(
-        product.article_content
-    )
-
-
-    product_title = escape(
-        product.title
-    )
-
-
-    page_title = escape(
-        article_title
-    )
-
-
-    description = (
-        excerpt
-        or (
-            "Independent SourceScout product research "
-            f"and buying insights for {product.title}."
-        )
-    )
-
-
-    description = truncate(
-        description,
-        155,
-    )
-
-
-    # ----------------------------------------------
-    # PRODUCT IMAGE
-    # ----------------------------------------------
 
     image_html = ""
 
-
-    if product.image_url:
+    if image_url:
 
         image_html = f"""
-        <div class="article-image">
-
-            <img
-                src="{escape(product.image_url)}"
-                alt="{product_title}"
-                loading="lazy"
-            >
-
-        </div>
+        <img
+            src="{image_url}"
+            alt="{product_title}"
+            class="product-image"
+            loading="lazy"
+        >
         """
-
-
-    # ----------------------------------------------
-    # PRODUCT FACTS
-    # ----------------------------------------------
-
-    product_facts = (
-        build_product_facts(
-            product
-        )
-    )
-
-
-    # ----------------------------------------------
-    # AFFILIATE BUTTON
-    # ----------------------------------------------
-
-    affiliate_button = ""
-
-
-    if product.affiliate_url:
-
-        affiliate_button = f"""
-        <section class="product-cta">
-
-            <h2>
-                Interested in this product?
-            </h2>
-
-            <p>
-                Check the current listing,
-                availability and pricing
-                on the marketplace.
-            </p>
-
-            <a
-                href="{escape(product.affiliate_url)}"
-                target="_blank"
-                rel="nofollow sponsored noopener"
-                class="cta-button"
-            >
-                Check Product
-            </a>
-
-            <p class="affiliate-note">
-
-                This may be an affiliate link.
-                SourceScout may earn a commission
-                at no additional cost to you.
-
-            </p>
-
-        </section>
-        """
-
 
     return f"""<!DOCTYPE html>
-
 <html lang="en">
 
 <head>
 
-    <meta charset="UTF-8">
+    <meta name="robots" content="index,follow">
+    <link rel="canonical" href="https://sourcescout.store/">
 
-    <meta
-        name="viewport"
-        content="width=device-width, initial-scale=1.0"
-    >
+    <meta name="author" content="SourceScout">
+    <meta property="og:type" content="article">
 
-    <title>
-        {page_title} | SourceScout
-    </title>
 
-    <meta
-        name="description"
-        content="{escape(description)}"
-    >
 
-    <link
-        rel="canonical"
-        href="{SITE_URL}/products/{escape(product.slug)}.html"
-    >
+<meta charset="UTF-8">
 
-    <link
-        rel="stylesheet"
-        href="../css/style.css"
-    >
+<meta
+    name="viewport"
+    content="width=device-width, initial-scale=1.0"
+>
 
-    <style>
+<title>{title} | SourceScout</title>
 
-        .article-container {{
-            max-width: 820px;
-            margin: 0 auto;
-            padding: 80px 24px;
-        }}
+<meta
+    name="description"
+    content="{excerpt}"
+>
 
-        .article-header {{
-            margin-bottom: 48px;
-        }}
+<style>
 
-        .article-category {{
-            color: #ff5733;
-            font-size: 13px;
-            font-weight: 700;
-            letter-spacing: 2px;
-            text-transform: uppercase;
-        }}
+body {{
+    margin: 0;
+    font-family:
+        -apple-system,
+        BlinkMacSystemFont,
+        "Segoe UI",
+        Arial,
+        sans-serif;
+    background: #f7f7f7;
+    color: #222;
+    line-height: 1.7;
+}}
 
-        .article-header h1 {{
-            font-size: clamp(
-                38px,
-                6vw,
-                64px
-            );
+.container {{
+    max-width: 850px;
+    margin: 0 auto;
+    padding: 40px 20px;
+}}
 
-            line-height: 1.05;
+.article {{
+    background: white;
+    padding: 40px;
+    border-radius: 14px;
+    box-shadow: 0 4px 20px rgba(0,0,0,.06);
+}}
 
-            margin:
-                18px
-                0;
-        }}
+h1 {{
+    font-size: 36px;
+    line-height: 1.2;
+}}
 
-        .article-meta {{
-            color: #777;
-            font-size: 14px;
-        }}
+h2 {{
+    margin-top: 35px;
+}}
 
-        .article-image {{
-            margin: 40px 0;
-        }}
+.excerpt {{
+    color: #666;
+    font-size: 18px;
+    margin-bottom: 30px;
+}}
 
-        .article-image img {{
-            display: block;
-            width: 100%;
-            max-height: 620px;
-            object-fit: contain;
-            border-radius: 8px;
-        }}
+.product-image {{
+    display: block;
+    max-width: 100%;
+    max-height: 500px;
+    margin: 25px auto;
+    object-fit: contain;
+    border-radius: 10px;
+}}
 
-        .product-facts {{
+.buy-box {{
+    margin: 35px 0;
+    padding: 25px;
+    background: #f3f7ff;
+    border-radius: 12px;
+    text-align: center;
+}}
 
-            display: grid;
+.price {{
+    font-size: 24px;
+    font-weight: 700;
+    margin-bottom: 15px;
+}}
 
-            grid-template-columns:
-                repeat(
-                    auto-fit,
-                    minmax(
-                        130px,
-                        1fr
-                    )
-                );
+.buy-button {{
+    display: inline-block;
+    padding: 14px 28px;
+    background: #111;
+    color: white;
+    text-decoration: none;
+    border-radius: 8px;
+    font-weight: 600;
+}}
 
-            gap: 1px;
+.disclosure {{
+    margin-top: 35px;
+    padding-top: 20px;
+    border-top: 1px solid #ddd;
+    color: #777;
+    font-size: 13px;
+}}
 
-            background: #ddd;
-
-            margin:
-                40px
-                0;
-
-            border:
-                1px
-                solid
-                #ddd;
-        }}
-
-        .fact-item {{
-            background: #f7f7f4;
-            padding: 22px;
-        }}
-
-        .fact-label {{
-            display: block;
-            color: #777;
-            font-size: 12px;
-            text-transform: uppercase;
-            letter-spacing: 1px;
-            margin-bottom: 7px;
-        }}
-
-        .fact-item strong {{
-            font-size: 18px;
-        }}
-
-        .article-content {{
-            font-size: 18px;
-            line-height: 1.8;
-        }}
-
-        .article-excerpt {{
-            font-size: 22px;
-            line-height: 1.6;
-            color: #555;
-            margin-bottom: 40px;
-        }}
-
-        .article-content h2 {{
-            margin-top: 52px;
-            margin-bottom: 16px;
-            font-size: 30px;
-            line-height: 1.25;
-        }}
-
-        .article-content h3 {{
-            margin-top: 36px;
-            margin-bottom: 12px;
-            font-size: 23px;
-        }}
-
-        .article-content p {{
-            margin-top: 0;
-            margin-bottom: 22px;
-        }}
-
-        .article-content ul {{
-            margin: 20px 0 30px;
-            padding-left: 25px;
-        }}
-
-        .article-content li {{
-            margin-bottom: 10px;
-        }}
-
-        .product-cta {{
-            margin: 60px 0;
-            padding: 40px;
-            background: #f5f5f2;
-            text-align: center;
-        }}
-
-        .product-cta h2 {{
-            margin-top: 0;
-        }}
-
-        .cta-button {{
-            display: inline-block;
-            margin-top: 12px;
-            padding: 16px 28px;
-            background: #111;
-            color: white;
-            text-decoration: none;
-            font-weight: 700;
-            border-radius: 4px;
-        }}
-
-        .affiliate-note {{
-            margin-top: 16px;
-            color: #777;
-            font-size: 12px;
-        }}
-
-        .article-disclosure {{
-            margin-top: 60px;
-            padding-top: 24px;
-            border-top: 1px solid #ddd;
-            color: #777;
-            font-size: 13px;
-            line-height: 1.6;
-        }}
-
-    </style>
+</style>
 
 </head>
 
-
 <body>
 
+<div class="container">
 
-<header>
+<article class="article">
 
-    <div class="container nav">
+<h1>{title}</h1>
 
-        <a
-            href="../index.html"
-            class="logo"
-        >
-            Source<span>Scout</span>
-        </a>
+<div class="excerpt">
+{excerpt}
+</div>
 
+{image_html}
 
-        <nav>
+<p>
+{introduction}
+</p>
 
-            <a href="../index.html">
-                Home
-            </a>
+<div class="buy-box">
 
-            <a href="../products.html">
-                Product Finds
-            </a>
+<div class="price">
+{price} CNY
+</div>
 
-            <a href="../guides.html">
-                Buying Guides
-            </a>
+<a
+    class="buy-button"
+    href="{affiliate_url}"
+    target="_blank"
+    rel="nofollow sponsored noopener"
+>
+View Product
+</a>
 
-            <a href="../about.html">
-                About
-            </a>
+</div>
 
-        </nav>
+<h2>Why It Stands Out</h2>
 
-    </div>
+<p>
+{why_it_stands_out}
+</p>
 
-</header>
+<h2>Who It's For</h2>
 
+<p>
+{who_its_for}
+</p>
 
-<main>
+<h2>Things to Consider</h2>
 
-    <article class="article-container">
+<p>
+{things_to_consider}
+</p>
 
+<h2>Our Verdict</h2>
 
-        <div class="article-header">
+<p>
+{verdict}
+</p>
 
-            <div class="article-category">
-                Product Find
-            </div>
+<div class="disclosure">
+SourceScout may earn a commission if you purchase
+through links on this page. This does not affect
+the editorial evaluation.
+</div>
 
-            <h1>
-                {page_title}
-            </h1>
+</article>
 
-            <div class="article-meta">
-                SourceScout Editorial
-            </div>
-
-        </div>
-
-
-        {image_html}
-
-
-        {product_facts}
-
-
-        <div class="article-content">
-
-            {article_content}
-
-        </div>
-
-
-        {affiliate_button}
-
-
-        <div class="article-disclosure">
-
-            SourceScout independently researches
-            products and marketplace opportunities.
-
-            Some links on this page may be affiliate
-            links, which means we may earn a commission
-            if you make a purchase through them.
-
-        </div>
-
-
-    </article>
-
-</main>
-
-
-<footer>
-
-    <div class="container">
-
-        <p>
-            © {datetime.now().year}
-            SourceScout.
-            All rights reserved.
-        </p>
-
-    </div>
-
-</footer>
-
+</div>
 
 </body>
-
 </html>
 """
 
 
-# ==================================================
-# PRODUCT CARD FOR products.html
-# ==================================================
+def sanitize_published_html(content):
+    """
+    Final safety layer.
 
-def build_product_card(product):
+    Converts accidental Markdown-wrapped affiliate URLs
+    inside generated HTML into real href URLs.
 
-    article_title, excerpt = (
-        get_article_data(
+    Example:
+
+    href="[https://m.tb.cn/h.123](https://m.tb.cn/h.123)"
+
+    becomes:
+
+    href="https://m.tb.cn/h.123"
+    """
+
+    from affiliate.utils.url_utils import clean_affiliate_url
+
+    # ---------------------------------------------------------
+    # Fix href attributes containing Markdown links
+    # ---------------------------------------------------------
+
+    def fix_href(match):
+        raw = match.group(1)
+
+        cleaned = clean_affiliate_url(raw)
+
+        if cleaned:
+            return f'href="{cleaned}"'
+
+        return match.group(0)
+
+    content = re.sub(
+        r'href="([^"]+)"',
+        fix_href,
+        content,
+        flags=re.IGNORECASE,
+    )
+
+    # ---------------------------------------------------------
+    # Final protection:
+    # if a Markdown affiliate URL somehow survived,
+    # convert the whole Markdown expression.
+    # ---------------------------------------------------------
+
+    def fix_markdown(match):
+        raw = match.group(0)
+
+        cleaned = clean_affiliate_url(raw)
+
+        return cleaned if cleaned else raw
+
+    content = re.sub(
+        r'\[https://(?:m\.tb\.cn|s\.click\.taobao\.com)/[^\]]+\]\(https://(?:m\.tb\.cn|s\.click\.taobao\.com)/[^)]+\)',
+        fix_markdown,
+        content,
+        flags=re.IGNORECASE,
+    )
+
+    # ---------------------------------------------------------
+    # HARD VALIDATION
+    # ---------------------------------------------------------
+
+    bad = re.findall(
+        r'href="\[https://(?:m\.tb\.cn|s\.click\.taobao\.com)/',
+        content,
+        flags=re.IGNORECASE,
+    )
+
+    if bad:
+        raise ValueError(
+            "❌ Published HTML still contains a Markdown-wrapped "
+            "affiliate URL."
+        )
+
+    return content
+
+
+def publish():
+
+    PRODUCTS_DIR.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    products = get_ready_products()
+
+    if not products:
+        print("\n❌ No products ready for publishing.")
+        return []
+
+    published = []
+
+    for product in products:
+
+        # Verify before writing.
+        clean_url = clean_affiliate_url(
+            product["affiliate_url"]
+        )
+
+        filename = (
+            PRODUCTS_DIR
+            / f"{product['slug']}.html"
+        )
+
+        content = build_article_html(
             product
         )
-    )
 
-
-    article_url = (
-        f"products/"
-        f"{product.slug}.html"
-    )
-
-
-    image_html = ""
-
-
-    if product.image_url:
-
-        image_html = f"""
-            <img
-                src="{escape(product.image_url)}"
-                alt="{escape(product.title)}"
-                loading="lazy"
-                style="
-                    width:100%;
-                    height:220px;
-                    object-fit:cover;
-                    margin-bottom:20px;
-                "
-            >
-        """
-
-
-    return f"""
-        <article
-            class="product-card"
-            data-product-id="{product.id}"
-        >
-
-            {image_html}
-
-            <div class="product-card-content">
-
-                <span class="product-platform">
-                    {escape(product.platform)}
-                </span>
-
-                <h2>
-                    <a href="{escape(article_url)}">
-                        {escape(article_title)}
-                    </a>
-                </h2>
-
-                <p>
-                    {escape(truncate(excerpt, 180))}
-                </p>
-
-                <div class="product-card-meta">
-
-                    <span>
-                        {escape(format_price(product.price))}
-                    </span>
-
-                    <span>
-                        {escape(product.rating)}/5
-                    </span>
-
-                </div>
-
-                <a
-                    href="{escape(article_url)}"
-                    class="read-more"
-                >
-                    Read Product Research →
-                </a>
-
-            </div>
-
-        </article>
-    """
-
-
-# ==================================================
-# PRODUCTS PAGE MANAGEMENT
-# ==================================================
-
-def ensure_products_markers():
-    """
-    Add automatic publishing markers to products.html.
-
-    The first time this runs, markers are inserted
-    immediately before </main>.
-    """
-
-    if not PRODUCTS_PAGE.exists():
-
-        raise FileNotFoundError(
-            f"products.html not found: "
-            f"{PRODUCTS_PAGE}"
+        filename.write_text(
+            content,
+            encoding="utf-8",
         )
 
+        print("\n✅ Published article:")
+        print(f"   Product ID: {product['id']}")
+        print(f"   Title: {product['title']}")
+        print(f"   Affiliate: {clean_url}")
+        print(f"   File: {filename}")
 
-    content = PRODUCTS_PAGE.read_text(
-        encoding="utf-8"
-    )
+        published.append(
+            str(filename)
+        )
+
+    return published
 
 
-    if (
-        PRODUCTS_START_MARKER in content
-        and PRODUCTS_END_MARKER in content
-    ):
 
+def generate_products_index():
+    """
+    Automatically rebuild products.html from every published
+    product article in the website repository.
+    """
+
+    site_path = Path(SITE)
+    products_dir = site_path / "products"
+    index_path = site_path / "products.html"
+
+    if not products_dir.exists():
+        print("⚠️ Products directory does not exist.")
         return
 
-
-    marker_block = f"""
-
-<section class="auto-products-section">
-
-    <div class="container">
-
-        <div class="auto-products-grid">
-
-{PRODUCTS_START_MARKER}
-
-{PRODUCTS_END_MARKER}
-
-        </div>
-
-    </div>
-
-</section>
-
-"""
-
-
-    if "</main>" not in content:
-
-        raise ValueError(
-            "Could not find </main> "
-            "inside products.html."
-        )
-
-
-    content = content.replace(
-        "</main>",
-        marker_block + "\n</main>",
-        1,
+    articles = sorted(
+        products_dir.glob("*.html"),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
     )
-
-
-    PRODUCTS_PAGE.write_text(
-        content,
-        encoding="utf-8",
-    )
-
-
-def update_products_page(
-    db,
-    include_product_id=None,
-):
-    """
-    Rebuild the automatic product cards section
-    using all products marked as published.
-    """
-
-    ensure_products_markers()
-
-
-    products = (
-        db.query(Product)
-        .filter(
-            (Product.publish_status == "published")
-            | (Product.id == include_product_id)
-        )
-        .order_by(
-            Product.published_at.desc()
-        )
-        .all()
-    )
-
 
     cards = []
 
+    for article in articles:
 
-    for product in products:
+        try:
+            html = article.read_text(encoding="utf-8")
 
-        if not product.slug:
-            continue
-
-        cards.append(
-            build_product_card(
-                product
+            title_match = re.search(
+                r"<title>(.*?)</title>",
+                html,
+                re.IGNORECASE | re.DOTALL,
             )
-        )
 
+            title = (
+                re.sub(r"\s+", " ", title_match.group(1)).strip()
+                if title_match
+                else article.stem.replace("-", " ").title()
+            )
 
-    cards_html = "\n".join(
-        cards
+            # Try to extract the first meaningful image.
+            image_match = re.search(
+                r'<img[^>]+src="([^"]+)"',
+                html,
+                re.IGNORECASE,
+            )
+
+            image = (
+                image_match.group(1)
+                if image_match
+                else ""
+            )
+
+            # Extract the article description/excerpt when available.
+            description_match = re.search(
+                r'<meta[^>]+name="description"[^>]+content="([^"]*)"',
+                html,
+                re.IGNORECASE,
+            )
+
+            description = (
+                description_match.group(1).strip()
+                if description_match
+                else "Independent product research and buying guide from SourceScout."
+            )
+
+            url = f"products/{article.name}"
+
+            image_html = (
+                f'<img src="{image}" alt="{title}" loading="lazy">'
+                if image
+                else '<div class="product-placeholder">SourceScout</div>'
+            )
+
+            cards.append(
+                f"""
+                <article class="product-card">
+                    <a href="{url}" class="product-image">
+                        {image_html}
+                    </a>
+
+                    <div class="product-content">
+                        <h2>
+                            <a href="{url}">{title}</a>
+                        </h2>
+
+                        <p>{description}</p>
+
+                        <a href="{url}" class="view-product">
+                            View Product →
+                        </a>
+                    </div>
+                </article>
+                """
+            )
+
+        except Exception as e:
+            print(
+                f"⚠️ Could not index {article.name}: {e}"
+            )
+
+    if not cards:
+        cards_html = """
+        <div class="empty-state">
+            <h2>No products published yet</h2>
+            <p>SourceScout is researching new products.</p>
+        </div>
+        """
+    else:
+        cards_html = "\n".join(cards)
+
+    page = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <title>Products | SourceScout</title>
+
+    <meta
+        name="description"
+        content="Discover independently researched products, buying guides, and recommendations from SourceScout."
+    >
+
+    <style>
+        * {{
+            box-sizing: border-box;
+        }}
+
+        body {{
+            margin: 0;
+            font-family:
+                -apple-system,
+                BlinkMacSystemFont,
+                "Segoe UI",
+                Roboto,
+                Arial,
+                sans-serif;
+            background: #f7f8fa;
+            color: #171717;
+        }}
+
+        header {{
+            background: #ffffff;
+            border-bottom: 1px solid #e5e7eb;
+            position: sticky;
+            top: 0;
+            z-index: 10;
+        }}
+
+        .nav {{
+            max-width: 1180px;
+            margin: auto;
+            padding: 18px 24px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }}
+
+        .brand {{
+            font-size: 22px;
+            font-weight: 800;
+            text-decoration: none;
+            color: #111827;
+        }}
+
+        nav a {{
+            margin-left: 24px;
+            color: #4b5563;
+            text-decoration: none;
+            font-size: 15px;
+        }}
+
+        nav a:hover {{
+            color: #111827;
+        }}
+
+        .hero {{
+            max-width: 1180px;
+            margin: auto;
+            padding: 60px 24px 30px;
+        }}
+
+        .hero h1 {{
+            margin: 0 0 12px;
+            font-size: clamp(34px, 5vw, 52px);
+            line-height: 1.05;
+        }}
+
+        .hero p {{
+            max-width: 700px;
+            color: #6b7280;
+            font-size: 18px;
+            line-height: 1.7;
+            margin: 0;
+        }}
+
+        .catalog {{
+            max-width: 1180px;
+            margin: auto;
+            padding: 20px 24px 70px;
+        }}
+
+        .product-grid {{
+            display: grid;
+            grid-template-columns:
+                repeat(auto-fit, minmax(280px, 1fr));
+            gap: 24px;
+        }}
+
+        .product-card {{
+            background: #ffffff;
+            border: 1px solid #e5e7eb;
+            border-radius: 16px;
+            overflow: hidden;
+            transition:
+                transform .18s ease,
+                box-shadow .18s ease;
+        }}
+
+        .product-card:hover {{
+            transform: translateY(-3px);
+            box-shadow: 0 12px 30px rgba(0,0,0,.08);
+        }}
+
+        .product-image {{
+            display: block;
+            height: 230px;
+            background: #f3f4f6;
+            overflow: hidden;
+        }}
+
+        .product-image img {{
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+            display: block;
+        }}
+
+        .product-placeholder {{
+            height: 100%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: #9ca3af;
+            font-weight: 700;
+        }}
+
+        .product-content {{
+            padding: 22px;
+        }}
+
+        .product-content h2 {{
+            margin: 0 0 12px;
+            font-size: 20px;
+            line-height: 1.35;
+        }}
+
+        .product-content h2 a {{
+            color: #111827;
+            text-decoration: none;
+        }}
+
+        .product-content p {{
+            margin: 0 0 20px;
+            color: #6b7280;
+            line-height: 1.6;
+            font-size: 14px;
+        }}
+
+        .view-product {{
+            display: inline-block;
+            color: #111827;
+            font-weight: 700;
+            text-decoration: none;
+        }}
+
+        .view-product:hover {{
+            text-decoration: underline;
+        }}
+
+        .empty-state {{
+            background: #ffffff;
+            border: 1px solid #e5e7eb;
+            border-radius: 16px;
+            padding: 60px 30px;
+            text-align: center;
+        }}
+
+        footer {{
+            border-top: 1px solid #e5e7eb;
+            background: #ffffff;
+            padding: 30px 24px;
+            text-align: center;
+            color: #6b7280;
+            font-size: 14px;
+        }}
+
+        @media (max-width: 650px) {{
+            .nav {{
+                padding: 16px;
+            }}
+
+            nav a {{
+                margin-left: 12px;
+            }}
+
+            .hero,
+            .catalog {{
+                padding-left: 16px;
+                padding-right: 16px;
+            }}
+        }}
+    </style>
+</head>
+
+<body>
+
+<header>
+    <div class="nav">
+        <a href="/" class="brand">SourceScout</a>
+
+        <nav>
+            <a href="/">Home</a>
+            <a href="/products.html">Products</a>
+            <a href="/guides.html">Guides</a>
+            <a href="/about.html">About</a>
+        </nav>
+    </div>
+</header>
+
+<main>
+
+    <section class="hero">
+        <h1>Product Research</h1>
+
+        <p>
+            Explore products researched and evaluated by SourceScout.
+            Each product includes independent analysis, important
+            considerations, and a direct route to the original listing.
+        </p>
+    </section>
+
+    <section class="catalog">
+        <div class="product-grid">
+            {cards_html}
+        </div>
+    </section>
+
+</main>
+
+<footer>
+    © 2026 SourceScout. Product research and affiliate disclosure apply.
+</footer>
+
+</body>
+</html>
+"""
+
+    index_path.write_text(
+        page,
+        encoding="utf-8",
+    )
+
+    print(
+        f"✅ Product index generated: "
+        f"{len(cards)} published products"
     )
 
 
-    content = PRODUCTS_PAGE.read_text(
+
+def generate_homepage_products():
+    """
+    Inject the latest published product cards into index.html.
+    """
+
+    site_path = Path(SITE)
+    products_dir = site_path / "products"
+    homepage = site_path / "index.html"
+
+    if not homepage.exists():
+        print("⚠️ index.html not found.")
+        return
+
+    articles = sorted(
+        products_dir.glob("*.html"),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+
+    cards = []
+
+    for article in articles[:6]:
+
+        try:
+            html = article.read_text(
+                encoding="utf-8"
+            )
+
+            title_match = re.search(
+                r"<title>(.*?)</title>",
+                html,
+                re.IGNORECASE | re.DOTALL,
+            )
+
+            title = (
+                re.sub(
+                    r"\s+",
+                    " ",
+                    title_match.group(1),
+                ).strip()
+                if title_match
+                else article.stem.replace(
+                    "-",
+                    " ",
+                ).title()
+            )
+
+            image_match = re.search(
+                r'<img[^>]+src="([^"]+)"',
+                html,
+                re.IGNORECASE,
+            )
+
+            image = (
+                image_match.group(1)
+                if image_match
+                else ""
+            )
+
+            description_match = re.search(
+                r'<meta[^>]+name="description"[^>]+content="([^"]*)"',
+                html,
+                re.IGNORECASE,
+            )
+
+            description = (
+                description_match.group(1).strip()
+                if description_match
+                else "Independent product research from SourceScout."
+            )
+
+            url = f"products/{article.name}"
+
+            image_html = (
+                f'<img src="{image}" alt="{title}" loading="lazy">'
+                if image
+                else '<div class="product-placeholder">SourceScout</div>'
+            )
+
+            cards.append(
+                f"""
+                <article class="scout-product-card">
+                    <a href="{url}" class="scout-product-image">
+                        {image_html}
+                    </a>
+
+                    <div class="scout-product-body">
+                        <h3>
+                            <a href="{url}">{title}</a>
+                        </h3>
+
+                        <p>{description}</p>
+
+                        <a href="{url}" class="scout-product-link">
+                            Read Research →
+                        </a>
+                    </div>
+                </article>
+                """
+            )
+
+        except Exception as e:
+            print(
+                f"⚠️ Homepage product error "
+                f"{article.name}: {e}"
+            )
+
+    if not cards:
+        print("⚠️ No published products for homepage.")
+        return
+
+    cards_html = "\n".join(cards)
+
+    homepage_text = homepage.read_text(
         encoding="utf-8"
     )
 
-
-    pattern = (
-        re.escape(
-            PRODUCTS_START_MARKER
-        )
-        + r".*?"
-        + re.escape(
-            PRODUCTS_END_MARKER
-        )
-    )
-
-
-    replacement = (
-        PRODUCTS_START_MARKER
-        + "\n"
-        + cards_html
-        + "\n"
-        + PRODUCTS_END_MARKER
-    )
-
-
-    updated_content = re.sub(
-        pattern,
-        replacement,
-        content,
-        flags=re.DOTALL,
-    )
-
-
-    PRODUCTS_PAGE.write_text(
-        updated_content,
-        encoding="utf-8",
-    )
-
-
-    print(
-        f"✅ products.html updated "
-        f"with {len(cards)} published product(s)."
-    )
-
-
-# ==================================================
-# SITEMAP MANAGEMENT
-# ==================================================
-
-def update_sitemap(
-    db,
-    include_product_id=None,
-):
-    """
-    Add all published product article URLs
-    to sitemap.xml.
-    """
-
-    products = (
-        db.query(Product)
-        .filter(
-            (Product.publish_status == "published")
-            | (Product.id == include_product_id)
-        )
-        .all()
-    )
-
-
-    product_entries = []
-
-
-    for product in products:
-
-        if not product.slug:
-            continue
-
-
-        if product.published_at:
-
-            try:
-
-                lastmod = (
-                    product.published_at
-                    .strftime(
-                        "%Y-%m-%d"
-                    )
-                )
-
-            except AttributeError:
-
-                lastmod = (
-                    datetime.now(
-                        timezone.utc
-                    )
-                    .strftime(
-                        "%Y-%m-%d"
-                    )
-                )
-
-        else:
-
-            lastmod = (
-                datetime.now(
-                    timezone.utc
-                )
-                .strftime(
-                    "%Y-%m-%d"
-                )
-            )
-
-
-        product_entries.append(
-            f"""
-    <url>
-
-        <loc>
-            {SITE_URL}/products/{escape(product.slug)}.html
-        </loc>
-
-        <lastmod>
-            {lastmod}
-        </lastmod>
-
-        <changefreq>
-            weekly
-        </changefreq>
-
-        <priority>
-            0.8
-        </priority>
-
-    </url>
-"""
-        )
-
-
-    product_xml = "\n".join(
-        product_entries
-    )
-
-
-    if SITEMAP_FILE.exists():
-
-        sitemap = (
-            SITEMAP_FILE.read_text(
-                encoding="utf-8"
-            )
-        )
-
-    else:
-
-        sitemap = """<?xml version="1.0" encoding="UTF-8"?>
-
-<urlset
-    xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"
->
-
-</urlset>
-"""
-
-
     start_marker = (
-        "<!-- AUTO-PRODUCT-SITEMAP-START -->"
+        '<!-- SOURCESCOUT_PRODUCTS_START -->'
     )
 
     end_marker = (
-        "<!-- AUTO-PRODUCT-SITEMAP-END -->"
+        '<!-- SOURCESCOUT_PRODUCTS_END -->'
     )
 
-
-    automatic_block = f"""
+    block = f"""
 {start_marker}
+<section class="scout-products-section">
 
-{product_xml}
+    <div class="scout-products-heading">
+        <div>
+            <span class="scout-eyebrow">
+                LATEST RESEARCH
+            </span>
 
+            <h2>Featured Products</h2>
+
+            <p>
+                Explore our latest independently researched
+                product picks.
+            </p>
+        </div>
+
+        <a href="/products.html" class="scout-view-all">
+            View All Products →
+        </a>
+    </div>
+
+    <div class="scout-product-grid">
+        {cards_html}
+    </div>
+
+</section>
 {end_marker}
 """
 
+    css = """
+<style id="sourcescout-product-home-css">
+.scout-products-section {
+    max-width: 1180px;
+    margin: 0 auto;
+    padding: 70px 24px;
+}
 
-    if (
-        start_marker in sitemap
-        and end_marker in sitemap
-    ):
+.scout-products-heading {
+    display: flex;
+    align-items: flex-end;
+    justify-content: space-between;
+    gap: 30px;
+    margin-bottom: 30px;
+}
 
-        pattern = (
-            re.escape(
-                start_marker
-            )
+.scout-eyebrow {
+    font-size: 12px;
+    font-weight: 800;
+    letter-spacing: .12em;
+    color: #6b7280;
+}
+
+.scout-products-heading h2 {
+    margin: 8px 0;
+    font-size: clamp(30px, 4vw, 42px);
+    line-height: 1.1;
+}
+
+.scout-products-heading p {
+    margin: 0;
+    color: #6b7280;
+}
+
+.scout-view-all {
+    white-space: nowrap;
+    color: #111827;
+    text-decoration: none;
+    font-weight: 700;
+}
+
+.scout-product-grid {
+    display: grid;
+    grid-template-columns:
+        repeat(auto-fit, minmax(280px, 1fr));
+    gap: 24px;
+}
+
+.scout-product-card {
+    overflow: hidden;
+    background: #fff;
+    border: 1px solid #e5e7eb;
+    border-radius: 16px;
+    transition:
+        transform .18s ease,
+        box-shadow .18s ease;
+}
+
+.scout-product-card:hover {
+    transform: translateY(-3px);
+    box-shadow: 0 12px 30px rgba(0,0,0,.08);
+}
+
+.scout-product-image {
+    display: block;
+    height: 220px;
+    overflow: hidden;
+    background: #f3f4f6;
+}
+
+.scout-product-image img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    display: block;
+}
+
+.scout-product-body {
+    padding: 20px;
+}
+
+.scout-product-body h3 {
+    margin: 0 0 10px;
+    font-size: 19px;
+    line-height: 1.35;
+}
+
+.scout-product-body h3 a {
+    color: #111827;
+    text-decoration: none;
+}
+
+.scout-product-body p {
+    margin: 0 0 18px;
+    color: #6b7280;
+    font-size: 14px;
+    line-height: 1.6;
+}
+
+.scout-product-link {
+    color: #111827;
+    text-decoration: none;
+    font-weight: 700;
+}
+
+.scout-product-link:hover {
+    text-decoration: underline;
+}
+
+.scout-product-body .product-placeholder {
+    height: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: #9ca3af;
+    font-weight: 700;
+}
+
+@media (max-width: 700px) {
+    .scout-products-section {
+        padding: 50px 16px;
+    }
+
+    .scout-products-heading {
+        align-items: flex-start;
+        flex-direction: column;
+    }
+}
+</style>
+"""
+
+    if start_marker in homepage_text:
+        pattern = re.compile(
+            re.escape(start_marker)
             + r".*?"
-            + re.escape(
-                end_marker
-            )
+            + re.escape(end_marker),
+            re.DOTALL,
         )
 
-
-        sitemap = re.sub(
-            pattern,
-            automatic_block.strip(),
-            sitemap,
-            flags=re.DOTALL,
+        homepage_text = pattern.sub(
+            block.strip(),
+            homepage_text,
         )
-
 
     else:
-
-        if "</urlset>" not in sitemap:
-
-            raise ValueError(
-                "Invalid sitemap.xml: "
-                "</urlset> was not found."
-            )
-
-
-        sitemap = sitemap.replace(
-            "</urlset>",
-            automatic_block
-            + "\n</urlset>",
-            1,
+        body_match = re.search(
+            r"</body>",
+            homepage_text,
+            re.IGNORECASE,
         )
 
+        if not body_match:
+            print(
+                "⚠️ </body> not found. "
+                "Homepage unchanged."
+            )
+            return
 
-    SITEMAP_FILE.write_text(
-        sitemap,
+        homepage_text = (
+            homepage_text[:body_match.start()]
+            + block
+            + "\n"
+            + homepage_text[body_match.start():]
+        )
+
+    if "sourcescout-product-home-css" not in homepage_text:
+        head_match = re.search(
+            r"</head>",
+            homepage_text,
+            re.IGNORECASE,
+        )
+
+        if head_match:
+            homepage_text = (
+                homepage_text[:head_match.start()]
+                + css
+                + "\n"
+                + homepage_text[head_match.start():]
+            )
+
+    homepage.write_text(
+        homepage_text,
         encoding="utf-8",
     )
 
-
     print(
-        f"✅ sitemap.xml updated "
-        f"with {len(product_entries)} "
-        f"product URL(s)."
+        f"✅ Homepage updated with "
+        f"{len(cards)} featured products."
     )
 
 
-# ==================================================
-# GIT AUTOMATIC DEPLOYMENT
-# ==================================================
+def deploy():
+    generate_homepage_products()
 
-def run_git_command(command):
-    """Run a Git command inside website repository."""
+    generate_products_index()
 
-    result = subprocess.run(
-        command,
-        cwd=WEBSITE_ROOT,
-        capture_output=True,
-        text=True,
-    )
+    published = publish()
 
-
-    if result.returncode != 0:
-
-        raise RuntimeError(
-            "\n"
-            f"Git command failed:\n"
-            f"{' '.join(command)}\n\n"
-            f"{result.stderr}"
-        )
-
-
-    return result.stdout.strip()
-
-
-def deploy_to_cloudflare(product):
-    """
-    Commit and push website changes.
-
-    Cloudflare Pages then deploys automatically
-    from the GitHub main branch.
-    """
-
-    print()
-    print(
-        "🚀 Preparing automatic deployment..."
-    )
-
-
-    run_git_command(
-        [
-            "git",
-            "add",
-            ".",
-        ]
-    )
-
-
-    status = run_git_command(
-        [
-            "git",
-            "status",
-            "--porcelain",
-        ]
-    )
-
-
-    if not status:
-
-        print(
-            "ℹ️ No website changes to commit."
-        )
-
+    if not published:
         return
 
+    print("\n========== GIT DEPLOY ==========")
 
-    commit_message = (
-        "Publish SourceScout product: "
-        f"{product.title}"
+    subprocess.run(
+        ["git", "add", "."],
+        cwd=SITE,
+        check=True,
     )
 
-
-    run_git_command(
+    result = subprocess.run(
         [
             "git",
             "commit",
             "-m",
-            commit_message,
-        ]
+            "Fix affiliate URLs",
+        ],
+        cwd=SITE,
+        capture_output=True,
+        text=True,
     )
 
+    if result.returncode == 0:
 
-    run_git_command(
-        [
-            "git",
-            "push",
-        ]
-    )
+        print(result.stdout)
 
-
-    print(
-        "✅ Changes pushed to GitHub."
-    )
-
-    print(
-        "☁️ Cloudflare Pages deployment triggered."
-    )
-
-
-# ==================================================
-# PUBLISH PRODUCT
-# ==================================================
-
-def publish_product(
-    product_id,
-    auto_deploy=True,
-):
-
-    db = SessionLocal()
-
-
-    try:
-
-        product = (
-            db.query(Product)
-            .filter(
-                Product.id
-                == product_id
-            )
-            .first()
-        )
-
-
-        if not product:
-
-            raise ValueError(
-                f"Product {product_id} "
-                "was not found."
-            )
-
-
-        if not product.slug:
-
-            raise ValueError(
-                "Product does not have a slug."
-            )
-
-
-        if not product.article_content:
-
-            raise ValueError(
-                "Product does not have "
-                "generated article content."
-            )
-
-
-        # ------------------------------------------
-        # REQUIRE AFFILIATE LINK
-        # ------------------------------------------
-
-        # Production deployment requires a real
-        # affiliate tracking URL.
-        #
-        # Preview mode (auto_deploy=False) is allowed
-        # without an affiliate URL.
-
-        if (
-            auto_deploy
-            and not str(
-                product.affiliate_url or ""
-            ).strip()
-        ):
-
-            raise ValueError(
-                "Product does not have an affiliate URL. "
-                "Add the affiliate tracking link before publishing."
-            )
-
-
-        # ------------------------------------------
-        # CREATE ARTICLE FILE
-        # ------------------------------------------
-
-        # Preview files are kept separate from
-        # production website article files.
-
-        if auto_deploy:
-
-            output_directory = (
-                PRODUCTS_DIR
-            )
-
-        else:
-
-            output_directory = (
-                WEBSITE_ROOT
-                / "previews"
-            )
-
-
-        output_directory.mkdir(
-            parents=True,
-            exist_ok=True,
-        )
-
-
-        output_path = (
-            output_directory
-            / f"{product.slug}.html"
-        )
-
-
-        page = build_article_page(
-            product
-        )
-
-
-        output_path.write_text(
-            page,
-            encoding="utf-8",
-        )
-
-
-        print()
-        print(
-            "✅ Article generated:"
+        subprocess.run(
+            ["git", "push", "origin", "main"],
+            cwd=SITE,
+            check=True,
         )
 
         print(
-            output_path
+            "\n✅ Website deployed successfully."
         )
 
-
-        # ------------------------------------------
-        # PREVIEW MODE — STOP HERE
-        # ------------------------------------------
-
-        if not auto_deploy:
-
-            print()
-            print(
-                "👁️ Preview generated successfully."
-            )
-
-            print(
-                "No database publishing status changed."
-            )
-
-            print(
-                "products.html was not updated."
-            )
-
-            print(
-                "sitemap.xml was not updated."
-            )
-
-            print(
-                "No GitHub or Cloudflare deployment occurred."
-            )
-
-            return output_path
-
-
-        # ------------------------------------------
-        # UPDATE WEBSITE INDEX FILES
-        # ------------------------------------------
-
-        update_products_page(
-            db,
-            include_product_id=product.id,
-        )
-
-
-        update_sitemap(
-            db,
-            include_product_id=product.id,
-        )
-
-
-        # ------------------------------------------
-        # DEPLOY FIRST
-        #
-        # Do not mark the product as published until
-        # deployment completes successfully.
-        # ------------------------------------------
-
-        deploy_to_cloudflare(
-            product
-        )
-
-
-        # ------------------------------------------
-        # MARK AS PUBLISHED AFTER SUCCESSFUL DEPLOY
-        # ------------------------------------------
-
-        product.publish_status = (
-            "published"
-        )
-
-
-        if not product.published_at:
-
-            product.published_at = (
-                datetime.utcnow()
-            )
-
-
-        db.commit()
-
-
-        public_url = (
-            f"{SITE_URL}/products/"
-            f"{product.slug}.html"
-        )
-
-
-        print()
-        print(
-            "🎉 Publishing pipeline completed."
-        )
-
-        print()
-        print(
-            "🌐 Public URL:"
-        )
+    elif "nothing to commit" in (
+        result.stdout + result.stderr
+    ).lower():
 
         print(
-            public_url
-        )
-
-
-        return output_path
-
-
-    except Exception:
-
-        db.rollback()
-
-        raise
-
-
-    finally:
-
-        db.close()
-
-
-# ==================================================
-# COMMAND LINE
-# ==================================================
-
-if __name__ == "__main__":
-
-    if len(sys.argv) > 1:
-
-        product_id = int(
-            sys.argv[1]
+            "\nℹ️ Nothing new to commit."
         )
 
     else:
 
-        product_id = 5
+        print(result.stdout)
+        print(result.stderr)
 
-
-    preview_mode = (
-        len(sys.argv) > 2
-        and sys.argv[2].strip().lower()
-        == "preview"
-    )
-
-
-    if preview_mode:
-
-        print()
-        print(
-            "👁️ PREVIEW MODE"
-        )
-
-        print(
-            "Article will be generated locally "
-            "without deployment."
+        raise RuntimeError(
+            "Git commit failed."
         )
 
 
-    publish_product(
-        product_id,
-        auto_deploy=not preview_mode,
+
+# SOURCE_SCOUT_CATALOG_ENHANCER_START
+
+def enhance_product_index():
+
+    output = Path(
+        "/Users/pro/product-finds-website/products.html"
     )
+
+    if not output.exists():
+        print("⚠️ products.html not found for enhancement.")
+        return
+
+    html = output.read_text(encoding="utf-8")
+
+    if 'id="scout-filter-input"' in html:
+        print("✅ Product catalog filters already present.")
+        return
+
+    css = """
+<style id="scout-catalog-css">
+.catalog-tools {
+    display: flex;
+    gap: 12px;
+    margin: 0 0 28px 0;
+    flex-wrap: wrap;
+}
+
+#scout-filter-input {
+    flex: 1;
+    min-width: 240px;
+    padding: 13px 16px;
+    border: 1px solid #d1d5db;
+    border-radius: 10px;
+    background: #fff;
+    font-size: 15px;
+}
+
+#scout-category,
+#scout-sort {
+    padding: 13px 16px;
+    border: 1px solid #d1d5db;
+    border-radius: 10px;
+    background: #fff;
+    font-size: 15px;
+}
+
+.scout-category {
+    display: inline-block;
+    margin-bottom: 10px;
+    padding: 5px 9px;
+    border-radius: 999px;
+    background: #f3f4f6;
+    color: #4b5563;
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+}
+
+#scout-no-results {
+    display: none;
+    text-align: center;
+    padding: 50px 20px;
+    color: #6b7280;
+}
+</style>
+"""
+
+    controls = """
+<div class="catalog-tools">
+
+    <input
+        id="scout-filter-input"
+        type="search"
+        placeholder="Search products..."
+        aria-label="Search products"
+    >
+
+    <select id="scout-category" aria-label="Category">
+        <option value="all">All Categories</option>
+        <option value="Coffee & Espresso">Coffee & Espresso</option>
+        <option value="Home & Kitchen">Home & Kitchen</option>
+        <option value="Beauty">Beauty</option>
+        <option value="Fashion">Fashion</option>
+        <option value="Electronics">Electronics</option>
+        <option value="Outdoor & Travel">Outdoor & Travel</option>
+        <option value="Other">Other</option>
+    </select>
+
+    <select id="scout-sort" aria-label="Sort">
+        <option value="latest">Latest</option>
+        <option value="az">A–Z</option>
+        <option value="za">Z–A</option>
+    </select>
+
+</div>
+
+<p id="scout-no-results">
+    No products match your search.
+</p>
+"""
+
+    script = """
+<script id="scout-catalog-js">
+(function () {
+
+    const input =
+        document.getElementById("scout-filter-input");
+
+    const category =
+        document.getElementById("scout-category");
+
+    const sort =
+        document.getElementById("scout-sort");
+
+    const grid =
+        document.querySelector(".product-grid");
+
+    const noResults =
+        document.getElementById("scout-no-results");
+
+    if (!input || !grid) {
+        return;
+    }
+
+    function updateCatalog() {
+
+        const query =
+            input.value.trim().toLowerCase();
+
+        const selected =
+            category ? category.value : "all";
+
+        const cards =
+            Array.from(
+                grid.querySelectorAll(".product-card")
+            );
+
+        cards.forEach(function (card) {
+
+            const text =
+                card.textContent.toLowerCase();
+
+            const cardCategory =
+                card.dataset.category || "Other";
+
+            const searchMatch =
+                !query || text.includes(query);
+
+            const categoryMatch =
+                selected === "all" ||
+                cardCategory === selected;
+
+            card.style.display =
+                searchMatch && categoryMatch
+                    ? ""
+                    : "none";
+        });
+
+        if (sort) {
+
+            cards.sort(function (a, b) {
+
+                const aText =
+                    a.textContent.trim();
+
+                const bText =
+                    b.textContent.trim();
+
+                if (sort.value === "az") {
+                    return aText.localeCompare(bText);
+                }
+
+                if (sort.value === "za") {
+                    return bText.localeCompare(aText);
+                }
+
+                return 0;
+            });
+
+            cards.forEach(function (card) {
+                grid.appendChild(card);
+            });
+        }
+
+        const visible =
+            cards.filter(function (card) {
+                return card.style.display !== "none";
+            });
+
+        if (noResults) {
+            noResults.style.display =
+                visible.length ? "none" : "block";
+        }
+    }
+
+    input.addEventListener(
+        "input",
+        updateCatalog
+    );
+
+    if (category) {
+        category.addEventListener(
+            "change",
+            updateCatalog
+        );
+    }
+
+    if (sort) {
+        sort.addEventListener(
+            "change",
+            updateCatalog
+        );
+    }
+
+})();
+</script>
+"""
+
+    # Insert controls immediately before product grid.
+    grid_marker = '<div class="product-grid">'
+
+    if grid_marker not in html:
+        print("❌ Product grid not found.")
+        return
+
+    html = html.replace(
+        grid_marker,
+        controls + "\n" + grid_marker,
+        1,
+    )
+
+    # Add category metadata to existing cards.
+    category_map = {
+        "Coffee & Espresso": [
+            "coffee", "espresso", "咖啡"
+        ],
+        "Home & Kitchen": [
+            "kitchen", "cooking", "home", "厨房", "家用"
+        ],
+        "Beauty": [
+            "beauty", "skincare", "makeup", "美容", "护肤"
+        ],
+        "Fashion": [
+            "jacket", "shirt", "dress", "bag", "shoes",
+            "fashion", "服装", "外套", "鞋", "包"
+        ],
+        "Electronics": [
+            "phone", "laptop", "tablet", "camera",
+            "headphone", "电子", "手机", "电脑", "耳机"
+        ],
+        "Outdoor & Travel": [
+            "travel", "camping", "outdoor",
+            "portable", "旅行", "户外", "便携"
+        ],
+    }
+
+    def category_for(card):
+        lower = re.sub("<[^>]+>", " ", card).lower()
+
+        for category, keywords in category_map.items():
+            if any(k in lower for k in keywords):
+                return category
+
+        return "Other"
+
+    def add_category(match):
+        tag = match.group(0)
+
+        if "data-category=" in tag:
+            return tag
+
+        return tag.replace(
+            'class="product-card"',
+            'class="product-card" data-category="'
+            + category_for(match.string[match.start():match.end()+400])
+            + '"',
+            1,
+        )
+
+    html = re.sub(
+        r'<article[^>]*class="product-card"[^>]*>',
+        add_category,
+        html,
+    )
+
+    # Insert CSS before </head>.
+    if "</head>" in html:
+        html = html.replace(
+            "</head>",
+            css + "\n</head>",
+            1,
+        )
+
+    # Insert JS before </body>.
+    if "</body>" in html:
+        html = html.replace(
+            "</body>",
+            script + "\n</body>",
+            1,
+        )
+
+    html = html.replace(
+        "<p id=\"scout-no-results\">",
+        "<p id=\"scout-no-results\">",
+    )
+
+    output.write_text(
+        html,
+        encoding="utf-8",
+    )
+
+    print("✅ Product index enhanced with search/category/sort.")
+
+
+# SOURCE_SCOUT_CATALOG_ENHANCER_END
+
+
+if __name__ == "__main__":
+    deploy()
+
+
+# Keep products.html enhancements after every publish.
+enhance()
+
+
+generate_seo_files()
+
+
+# Always regenerate SEO metadata after publishing articles.
+enhance_seo_metadata()
+
+
+generate_homepage_seo()
+
+
+# Search Console sitemap submission
+# Runs only when Google OAuth credentials are configured.
+try:
+    from google_search_console import build_service, submit_sitemap
+
+    print("\n========== GOOGLE SEARCH CONSOLE ==========")
+    gsc = build_service()
+    submit_sitemap(gsc)
+
+except Exception as e:
+    print(f"ℹ️ Search Console submission skipped: {e}")
