@@ -1,6 +1,8 @@
 from pathlib import Path
 import re
 
+import category_taxonomy
+
 SITE = Path.home() / "product-finds-website"
 INDEX = SITE / "products.html"
 BASE_URL = "https://sourcescout.store"
@@ -57,38 +59,7 @@ def enhance_seo():
     print("✅ products.html SEO metadata installed.")
 
 def category(title):
-    t = title.lower()
-
-    rules = {
-        "Coffee & Espresso": [
-            "coffee", "espresso", "咖啡"
-        ],
-        "Beauty": [
-            "beauty", "skincare", "makeup", "美容", "护肤"
-        ],
-        "Fashion": [
-            "jacket", "shirt", "dress", "bag", "shoes",
-            "fashion", "服装", "外套", "鞋", "包"
-        ],
-        "Electronics": [
-            "phone", "laptop", "tablet", "camera",
-            "headphone", "电子", "手机", "电脑", "耳机"
-        ],
-        "Outdoor & Travel": [
-            "travel", "camping", "outdoor",
-            "portable", "旅行", "户外", "便携"
-        ],
-        "Home & Kitchen": [
-            "kitchen", "cooking", "home",
-            "厨房", "家用"
-        ],
-    }
-
-    for name, words in rules.items():
-        if any(w in t for w in words):
-            return name
-
-    return "Other"
+    return category_taxonomy.category_for(title) or "Other"
 
 
 def enhance():

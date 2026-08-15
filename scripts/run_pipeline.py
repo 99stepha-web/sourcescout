@@ -11,12 +11,70 @@ if PROJECT_ROOT not in sys.path:
 print("PROJECT_ROOT:", PROJECT_ROOT)
 print("PYTHONPATH:", sys.path[0])
 
+from datetime import datetime
+
 from agents.research_agent import ResearchAgent
 from database import SessionLocal
 from models import Product
 from analysis_service import analyze_and_save_product
 from publishing_service import generate_and_save_article
 from affiliate.utils.url_utils import clean_affiliate_url
+from product_scoring import calculate_selection_score, deduplicate_candidates, as_dict
+from config.intelligence import SELECTION_CONFIG
+
+
+def should_reanalyze(product):
+    """
+    Test I / idempotency: a product already analyzed with a saved
+    article does not need another Claude analysis call just because
+    the same keyword rediscovered it.
+    """
+
+    return not (product.ai_analyzed_at and product.article_content)
+
+
+def should_regenerate_article(product):
+    """
+    Test I / idempotency: a PROMOTE product that already has a
+    published article does not need another Claude article-generation
+    call on rediscovery.
+    """
+
+    return not (product.article_content and product.slug)
+
+
+def print_selection_report(keyword, report, scored, approved=0, review=0, skipped=0):
+    print("\n" + "=" * 60)
+    print("SOURCE SCOUT PRODUCT SELECTION REPORT")
+    print("=" * 60)
+
+    print(f"\nKeyword: {keyword}")
+
+    print(f"\nMarketplace candidates: {report['marketplace_candidates']}")
+    print(f"Category-valid: {report['category_valid']}")
+    print(f"Passed hard filters: {report['passed_hard_filters']}")
+    print(f"Ranked candidates: {report['ranked_candidates']}")
+    print(f"Sent to Claude: {report['sent_to_claude']}")
+    print(f"Approved: {approved}")
+    print(f"Review: {review}")
+    print(f"Skipped: {skipped}")
+
+    top = sorted(
+        scored, key=lambda pair: pair[1]["selection_score"], reverse=True
+    )[:5]
+
+    if top:
+        print("\nTOP PRODUCTS")
+
+        for i, (product, result) in enumerate(top, start=1):
+            print(f"\n{i}. Product {product.id}: {product.title[:50]}")
+            print(f"   Selection Score: {result['selection_score']}")
+
+            for name, factor in result["breakdown"].items():
+                shown = factor["score"] if factor["score"] is not None else "N/A"
+                print(f"   {name.capitalize()}: {shown}")
+
+    print("\n" + "=" * 60)
 
 
 def main():
@@ -241,6 +299,94 @@ def main():
             return
 
         # =====================================================
+        # STAGE A + B — hard filter, dedup, opportunity ranking
+        #
+        # Runs entirely on already-stored marketplace data (no
+        # Claude call) so weak/off-category products never reach the
+        # expensive analysis step.
+        # =====================================================
+
+        print(
+            "\n[Selection] Filtering and ranking candidates..."
+        )
+
+        survivors, dropped_duplicates = deduplicate_candidates(processed, keyword)
+
+        for product, reason in dropped_duplicates:
+            print(f"⏭️ Duplicate suppressed: Product {product.id} — {reason}")
+
+        scored = []
+
+        for product in survivors:
+            result = calculate_selection_score(product, keyword)
+
+            product.selection_score = result["selection_score"]
+            product.selection_status = result["selection_status"]
+            product.selection_reason = result["selection_reason"]
+
+            scored.append((product, result))
+
+        db.commit()
+
+        category_valid = [
+            p for p, r in scored if r["selection_status"] != "CATEGORY_MISMATCH"
+        ]
+
+        passed_hard_filter = [
+            p for p, r in scored
+            if r["selection_status"] not in ("CATEGORY_MISMATCH", "HARD_FILTERED")
+        ]
+
+        ranked = sorted(
+            (p for p, r in scored if r["selection_status"] == "RANKED"),
+            key=lambda p: p.selection_score,
+            reverse=True,
+        )
+
+        claude_limit = SELECTION_CONFIG["claude_analysis_limit"]
+        shortlisted = ranked[:claude_limit]
+
+        report = {
+            "marketplace_candidates": len(processed),
+            "category_valid": len(category_valid),
+            "passed_hard_filters": len(passed_hard_filter),
+            "ranked_candidates": len(ranked),
+            "sent_to_claude": len(shortlisted),
+        }
+
+        print(
+            f"\n✅ {len(processed)} candidates -> "
+            f"{len(category_valid)} category-valid -> "
+            f"{len(passed_hard_filter)} passed hard filters -> "
+            f"{len(ranked)} ranked -> "
+            f"{len(shortlisted)} sent to Claude"
+        )
+
+        for product, result in scored:
+            print(
+                f"\nProduct {product.id}: {product.title[:40]}"
+            )
+            print(
+                f"   Selection Score: {result['selection_score']} "
+                f"({result['selection_status']})"
+            )
+            for name, factor in result["breakdown"].items():
+                shown = factor["score"] if factor["score"] is not None else "N/A"
+                print(f"   {name.capitalize()}: {shown}")
+            if result["selection_status"] != "RANKED":
+                print(f"   Reasons: {result['selection_reason']}")
+
+        if not shortlisted:
+
+            print(
+                "\n❌ No candidates survived filtering/ranking."
+            )
+
+            print_selection_report(keyword, report, scored)
+
+            return
+
+        # =====================================================
         # 3. CLAUDE ANALYSIS
         # =====================================================
 
@@ -250,7 +396,7 @@ def main():
 
         analyzed = []
 
-        for product in processed:
+        for product in shortlisted:
 
             print(
                 f"\n========== AI ANALYSIS =========="
@@ -270,7 +416,7 @@ def main():
             # a later run of the same keyword should not burn a new
             # API call and rewrite an unchanged article; the affiliate
             # URL is still refreshed on every publish regardless.
-            if product.ai_analyzed_at and product.article_content:
+            if not should_reanalyze(product):
 
                 print(
                     "⏭️ Already analyzed with an existing "
@@ -313,6 +459,8 @@ def main():
                 "\n❌ No products were analyzed."
             )
 
+            print_selection_report(keyword, report, scored)
+
             return
 
         # =====================================================
@@ -325,6 +473,10 @@ def main():
 
         generated = []
         promoted = []
+        review_products = []
+        skipped_products = []
+
+        needs_generation = []
 
         for product in analyzed:
 
@@ -336,6 +488,11 @@ def main():
                 .strip()
                 .upper()
             )
+
+            if decision == "REVIEW":
+                review_products.append(product)
+            elif decision != "PROMOTE":
+                skipped_products.append(product)
 
             if decision != "PROMOTE":
 
@@ -358,7 +515,7 @@ def main():
             # call regenerating unchanged article text. The website
             # deploy step still runs below and will pick up any
             # affiliate URL refresh from ingestion regardless.
-            if product.article_content and product.slug:
+            if not should_regenerate_article(product):
 
                 print(
                     f"\n⏭️ Product {product.id} already has a "
@@ -366,6 +523,26 @@ def main():
                 )
 
                 continue
+
+            needs_generation.append(product)
+
+        # Cap new article generation per run (cost control) —
+        # prioritize the strongest candidates by selection score.
+        article_limit = SELECTION_CONFIG["article_generation_limit"]
+
+        needs_generation.sort(
+            key=lambda p: p.selection_score or 0,
+            reverse=True,
+        )
+
+        for product in needs_generation[article_limit:]:
+            print(
+                f"\n⏭️ Product {product.id} approved but over the "
+                f"per-run article limit ({article_limit}) — will "
+                "generate on a future run."
+            )
+
+        for product in needs_generation[:article_limit]:
 
             print(
                 f"\n========== ARTICLE =========="
@@ -413,60 +590,71 @@ def main():
         # 5. WEBSITE DEPLOYMENT
         # =====================================================
 
-        if not promoted:
+        if promoted:
 
             print(
-                "\n[5/5] Nothing approved "
-                "for publishing."
+                "\n[5/5] Deploying website..."
             )
+
+            import website_publisher
+
+            website_publisher.deploy()
+
+        else:
 
             print(
-                "\n⚠️ Pipeline finished."
+                "\n[5/5] Nothing approved for publishing "
+                "— skipping deploy."
             )
 
-            return
+        # =====================================================
+        # SELECTION REPORT (item 25)
+        # =====================================================
 
-        print(
-            "\n[5/5] Deploying website..."
+        print_selection_report(
+            keyword,
+            report,
+            scored,
+            approved=len(promoted),
+            review=len(review_products),
+            skipped=len(skipped_products),
         )
 
-        import website_publisher
-
-        website_publisher.deploy()
-
-        print(
-            "\n========================================"
-        )
-
-        print(
-            "✅ SOURCE SCOUT PIPELINE COMPLETE"
-        )
-
-        print(
-            "========================================"
-        )
-
-        for article in generated:
+        if generated:
 
             print(
-                f"\nProduct ID: "
-                f"{article['product_id']}"
+                "\n========================================"
             )
 
             print(
-                f"Title: "
-                f"{article['article_title']}"
+                "✅ SOURCE SCOUT PIPELINE COMPLETE"
             )
 
             print(
-                f"Slug: "
-                f"{article['slug']}"
+                "========================================"
             )
 
-            print(
-                f"Status: "
-                f"{article['publish_status']}"
-            )
+            for article in generated:
+
+                print(
+                    f"\nProduct ID: "
+                    f"{article['product_id']}"
+                )
+
+                print(
+                    f"Title: "
+                    f"{article['article_title']}"
+                )
+
+                print(
+                    f"Slug: "
+                    f"{article['slug']}"
+                )
+
+                print(
+                    f"Status: "
+                    f"{article['publish_status']}"
+                )
 
     finally:
 

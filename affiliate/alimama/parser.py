@@ -4,6 +4,7 @@ import uuid
 from playwright.sync_api import Page
 
 from affiliate.utils.url_utils import extract_stable_product_id
+from product_scoring import extract_badges
 
 
 class AlimamaParser:
@@ -48,7 +49,8 @@ class AlimamaParser:
                 title = self._extract_title(card)
                 product_url = self._extract_product_url(card)
                 image_url = self._extract_image_url(card)
-                price, commission_rate = self._extract_card_metrics(card)
+                price, commission_rate, badges = self._extract_card_metrics(card)
+                shop_name = self._extract_shop_name(card)
 
                 if not title:
                     print(
@@ -72,6 +74,8 @@ class AlimamaParser:
                         "image_url": image_url,
                         "price": price,
                         "commission_rate": commission_rate,
+                        "badges": badges,
+                        "shop_name": shop_name,
                     }
                 )
 
@@ -108,6 +112,8 @@ class AlimamaParser:
             image_url = snapshot["image_url"]
             price = snapshot["price"]
             commission_rate = snapshot["commission_rate"]
+            badges = snapshot["badges"]
+            shop_name = snapshot["shop_name"]
 
             print(
                 "\\n========================================"
@@ -156,6 +162,8 @@ class AlimamaParser:
                 print(
                     f"Current URL: {detail_page.url}"
                 )
+
+                detail_metrics = self._extract_detail_metrics(detail_page)
 
                 # -------------------------------------------------
                 # FIND PROMOTION BUTTON
@@ -345,32 +353,53 @@ class AlimamaParser:
                     # "monthly_sales" and "shop_name" ARE visible on the
                     # search-results card itself (see _extract_card_metrics
                     # for price/commission_rate, extracted the same way),
-                    # but only inside the hover-only tooltip section, which
-                    # requires simulating a hover before reading it — not
-                    # done here to avoid adding untested interaction to an
-                    # already fragile parser.
+                    # while monthly_sales/monthly_promoters/today_sales and
+                    # the price/commission category percentiles come from
+                    # the detail page's "推广热度" section (see
+                    # _extract_detail_metrics).
                     #
-                    # To complete: refresh data/alimama_state.json with a
-                    # real login, then inspect detail_page's DOM for
-                    # orders/rating/supplier_score and the hover tooltip
-                    # for monthly_sales/shop_name before adding selectors.
-                    "orders": 0,
+                    # NOT AVAILABLE anywhere on pub.alimama.com (verified
+                    # live 2026-08-15, both card and detail page): product
+                    # rating and review count. This is an affiliate/
+                    # promotion portal, not the consumer Taobao product
+                    # page — it exposes commission/sales/DSR data to
+                    # affiliates, not customer review text. A shop DSR
+                    # quality section (综合体验/宝贝描述/卖家服务/物流服务)
+                    # exists in the DOM but was empty/unpopulated for every
+                    # sampled product, so it isn't read here — left as a
+                    # future addition once a sample with real DSR values is
+                    # found. Left NULL rather than fabricated.
+                    "orders": detail_metrics["monthly_sales"],
 
-                    "monthly_sales": 0,
+                    "monthly_sales": detail_metrics["monthly_sales"],
 
-                    "rating": 0.0,
+                    "monthly_promoters": detail_metrics["monthly_promoters"],
 
-                    "review_count": 0,
+                    "today_sales": detail_metrics["today_sales"],
 
-                    "supplier": "",
+                    "price_percentile": detail_metrics["price_percentile"],
 
-                    "shop_name": "",
+                    "commission_percentile": detail_metrics["commission_percentile"],
 
-                    "supplier_score": 0.0,
+                    "rating": None,
+
+                    "review_count": None,
+
+                    "supplier": shop_name,
+
+                    "shop_name": shop_name,
+
+                    "shop_rating": None,
+
+                    "supplier_score": None,
+
+                    "badges": badges,
 
                     "moq": "",
 
                     "commission_rate": commission_rate,
+
+                    "commission_amount": round(price * commission_rate / 100, 2) if price and commission_rate else None,
 
                     "product_url": product_url,
 
@@ -525,11 +554,12 @@ class AlimamaParser:
 
         price = 0.0
         commission_rate = 0.0
+        badges = ""
 
         try:
             text = card.inner_text()
         except Exception:
-            return price, commission_rate
+            return price, commission_rate, badges
 
         price_match = self.PRICE_PATTERN.search(text)
 
@@ -551,7 +581,99 @@ class AlimamaParser:
             except ValueError:
                 pass
 
-        return price, commission_rate
+        badges = ",".join(extract_badges(text))
+
+        return price, commission_rate, badges
+
+    # =========================================================
+    # SHOP NAME
+    #
+    # Only present in the card's hover-only tooltip section. This
+    # runs during the read-only snapshot phase (before any product
+    # page is opened), so it does not interact with cards after a
+    # navigation change — hovering doesn't navigate anything.
+    # =========================================================
+
+    SHOP_NAME_PATTERN = re.compile(r"店铺名称[：:]\s*([^\n]+)")
+
+    def _extract_shop_name(self, card):
+
+        try:
+            card.hover(timeout=5000)
+            card.page.wait_for_timeout(600)
+            text = card.inner_text()
+        except Exception:
+            return ""
+
+        match = self.SHOP_NAME_PATTERN.search(text)
+
+        return match.group(1).strip() if match else ""
+
+    # =========================================================
+    # DETAIL PAGE METRICS
+    #
+    # The "推广热度" (promotion heat) section on the detail page
+    # exposes real monthly/daily sales for this specific listing,
+    # plus how it compares on price/commission to its own category
+    # ("价格低于X%同类" / "佣金率高于X%同类") — all directly
+    # displayed by the marketplace, not derived/estimated here.
+    # =========================================================
+
+    def _extract_detail_metrics(self, detail_page):
+
+        metrics = {
+            "monthly_sales": None,
+            "monthly_promoters": None,
+            "today_sales": None,
+            "price_percentile": None,
+            "commission_percentile": None,
+        }
+
+        # This section renders asynchronously and can take several
+        # seconds longer than the rest of the page — wait for it
+        # explicitly rather than guessing a fixed delay. If it never
+        # appears, the metrics genuinely aren't available for this
+        # listing; that's a real "unavailable" state, not a bug.
+        try:
+            detail_page.wait_for_selector(
+                "text=价格低于", timeout=10000
+            )
+        except Exception:
+            pass
+
+        try:
+            text = detail_page.locator("body").inner_text()
+        except Exception:
+            return metrics
+
+        price_pct = re.search(r"价格低于([\d.]+)%", text)
+        if price_pct:
+            metrics["price_percentile"] = float(price_pct.group(1))
+
+        commission_pct = re.search(r"佣金率高于([\d.]+)%", text)
+        if commission_pct:
+            metrics["commission_percentile"] = float(commission_pct.group(1))
+
+        heat_start = text.find("推广热度")
+        history_start = text.find("历史表现")
+
+        if heat_start != -1:
+            section = text[heat_start:history_start if history_start != -1 else heat_start + 500]
+
+            today_match = re.search(
+                r"今日\s*推广淘客数\s*(\d+)\s*推广销量\s*(\d+)", section
+            )
+            if today_match:
+                metrics["today_sales"] = int(today_match.group(2))
+
+            month_match = re.search(
+                r"月\s*推广淘客数\s*(\d+)\s*推广销量\s*(\d+)", section
+            )
+            if month_match:
+                metrics["monthly_promoters"] = int(month_match.group(1))
+                metrics["monthly_sales"] = int(month_match.group(2))
+
+        return metrics
 
     # =========================================================
     # PRODUCT URL

@@ -27,18 +27,23 @@ Rules:
 - Never invent product facts.
 - Never assume authenticity.
 - Never invent discounts, sales numbers, certifications, or supplier claims.
+- Never state an exact number (sales, orders, reviews, rating, commission,
+  price) that isn't literally given to you below. If you want to reason
+  about volume/popularity, describe it qualitatively ("no sales evidence",
+  "meaningful review volume") rather than inventing a figure.
 - Distinguish provided facts from your own marketing analysis.
 - Consider whether the product has an interesting social-media content angle.
 - Consider the likely target audience.
 - Identify important information that must be verified before promotion.
 - Be conservative when information is incomplete.
 
-A field showing 0, empty, or "unknown" means that data point was not
-captured during research — it does NOT mean the real-world value is zero.
-Distinguish two different situations and choose the decision accordingly:
+A field showing "None" means that data point was not captured or is not
+exposed by the marketplace — it does NOT mean the real-world value is
+zero. Distinguish two different situations and choose the decision
+accordingly:
 
-- INSUFFICIENT DATA: several key fields (orders, rating, supplier score)
-  are all missing/zero and there is nothing else to judge the product on.
+- INSUFFICIENT DATA: several key fields (sales, rating, supplier score)
+  are all missing and there is nothing else to judge the product on.
   This alone is not evidence the product is bad. Use REVIEW and say what
   data is missing in "verification_needed".
 - BAD PRODUCT: the fields that ARE present show real negative signal
@@ -47,7 +52,16 @@ Distinguish two different situations and choose the decision accordingly:
   listing). Use SKIP and say why in "risks".
 
 Use PROMOTE only when the available evidence is genuinely positive, not
-merely absent.
+merely absent. A pre-computed Selection Score and its breakdown are
+provided below — these came from a deterministic marketplace-data
+scorer, not from you. Treat them as evidence, weigh them alongside your
+own qualitative read, but you are not required to agree with them; your
+own reasoning about buyer intent, differentiation, and risk still
+matters. In "why_it_could_sell", explain concretely why this product is
+commercially attractive to buyers and, when the selection score
+breakdown shows a clear strength (e.g. strong sales, strong commission),
+say so; in "risks", call out anything that makes it a weaker bet than
+its score alone suggests.
 
 Return ONLY valid JSON using exactly this structure:
 
@@ -80,16 +94,32 @@ Product: {product.title}
 Category: {product.category}
 Price: {product.price}
 Original Price: {product.original_price}
-Orders: {product.orders}
+Price percentile in category: {product.price_percentile} (higher = cheaper than more of the category)
+
+Monthly Sales: {product.monthly_sales}
+Today's Sales: {product.today_sales}
+Orders (fallback when monthly sales unavailable): {product.orders}
+Marketplace trend/bestseller badges: {product.badges}
+
 Rating: {product.rating}
 Review Count: {product.review_count}
-Supplier: {product.supplier}
+
+Supplier/Shop: {product.supplier}
 Supplier Score: {product.supplier_score}
+Shop Rating: {product.shop_rating}
+
 Commission Rate: {product.commission_rate}%
-Algorithmic Opportunity Score: {product.opportunity_score}
-Research Keyword: {product.research_keyword}
+Commission Amount (per sale): {product.commission_amount}
+Commission percentile in category: {product.commission_percentile} (higher = better commission than more of the category)
+
+Search Keyword: {product.research_keyword}
 Product URL: {product.product_url}
 Image URL: {product.image_url}
+
+--- Deterministic marketplace scorer output (not written by you) ---
+Selection Score (0-100): {product.selection_score}
+Selection Status: {product.selection_status}
+Selection Score Breakdown / Reasons: {product.selection_reason}
 """
 
     response = client.messages.create(

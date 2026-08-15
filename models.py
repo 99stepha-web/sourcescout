@@ -64,15 +64,13 @@ class Product(Base):
         default=0,
     )
 
-    orders = Column(
-        Integer,
-        default=0,
-    )
+    # No Python-side default: unlike price, these are frequently not
+    # exposed by the marketplace at all, and SQLAlchemy's `default=`
+    # fires even on an explicitly-passed None, which would silently
+    # turn "unavailable" into a fabricated 0. Leave unset -> NULL.
+    orders = Column(Integer)
 
-    rating = Column(
-        Float,
-        default=0,
-    )
+    rating = Column(Float)
 
     # Marketplace product metadata
     supplier = Column(Text)
@@ -80,17 +78,51 @@ class Product(Base):
     price_text = Column(String(500))
     price_min = Column(Float)
     price_max = Column(Float)
-    review_count = Column(Integer, default=0)
+    review_count = Column(Integer)
 
-    supplier_score = Column(
-        Float,
-        default=0,
-    )
+    supplier_score = Column(Float)
 
     commission_rate = Column(
         Float,
         default=0,
     )
+
+    commission_amount = Column(Float)
+
+    # --------------------------------------------------
+    # Product selection intelligence
+    #
+    # Raw marketplace signals used by product_scoring.py. Left NULL
+    # when the marketplace does not expose a metric for a given
+    # product — never backfilled with a fabricated value.
+    # --------------------------------------------------
+
+    monthly_sales = Column(Integer)
+    monthly_promoters = Column(Integer)
+    today_sales = Column(Integer)
+
+    price_percentile = Column(Float)
+    commission_percentile = Column(Float)
+
+    shop_rating = Column(Float)
+
+    listing_date = Column(String(50))
+    subcategory = Column(String(100))
+
+    sales_velocity = Column(Float)
+    review_velocity = Column(Float)
+
+    last_seen_at = Column(DateTime)
+    last_metrics_update = Column(DateTime)
+
+    selection_score = Column(Float)
+    selection_status = Column(String(50))
+    selection_reason = Column(Text)
+
+    # Comma-separated marketplace badge/trend labels as literally
+    # displayed on the card (e.g. "热门商品,超千人种草") — never
+    # inferred, only recorded when the marketplace shows them.
+    badges = Column(Text)
 
     # --------------------------------------------------
     # Product URLs and images
