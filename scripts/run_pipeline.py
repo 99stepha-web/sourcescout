@@ -264,6 +264,23 @@ def main():
                 f"Title: {product.title}"
             )
 
+            # Skip re-analysis (and the Claude call it costs) for a
+            # product that already has a saved analysis and a
+            # generated article. Re-discovering the same product on
+            # a later run of the same keyword should not burn a new
+            # API call and rewrite an unchanged article; the affiliate
+            # URL is still refreshed on every publish regardless.
+            if product.ai_analyzed_at and product.article_content:
+
+                print(
+                    "⏭️ Already analyzed with an existing "
+                    "article — skipping re-analysis."
+                )
+
+                analyzed.append(product)
+
+                continue
+
             try:
 
                 product = analyze_and_save_product(
@@ -307,6 +324,7 @@ def main():
         )
 
         generated = []
+        promoted = []
 
         for product in analyzed:
 
@@ -328,6 +346,23 @@ def main():
 
                 print(
                     f"Claude decision: {decision or 'UNKNOWN'}"
+                )
+
+                continue
+
+            promoted.append(product)
+
+            # Already has a saved article from a previous run and
+            # nothing about the analysis changed this time (see the
+            # matching skip in step 3) — don't burn another Claude
+            # call regenerating unchanged article text. The website
+            # deploy step still runs below and will pick up any
+            # affiliate URL refresh from ingestion regardless.
+            if product.article_content and product.slug:
+
+                print(
+                    f"\n⏭️ Product {product.id} already has a "
+                    "published article — skipping regeneration."
                 )
 
                 continue
@@ -378,7 +413,7 @@ def main():
         # 5. WEBSITE DEPLOYMENT
         # =====================================================
 
-        if not generated:
+        if not promoted:
 
             print(
                 "\n[5/5] Nothing approved "

@@ -331,6 +331,29 @@ class AlimamaParser:
 
                     "price_max": 0.0,
 
+                    # TODO(orders/rating/supplier_score): not yet extracted.
+                    #
+                    # These are left at 0/empty rather than guessed. The
+                    # saved session in data/alimama_state.json is expired
+                    # (verified 2026-08-15: navigating a real product_url
+                    # with it redirects to the pub.alimama.com login gate
+                    # instead of the detail page), so the actual detail
+                    # page / promotion-dialog DOM for these fields has not
+                    # been inspected live and selectors must not be
+                    # guessed against it.
+                    #
+                    # "monthly_sales" and "shop_name" ARE visible on the
+                    # search-results card itself (see _extract_card_metrics
+                    # for price/commission_rate, extracted the same way),
+                    # but only inside the hover-only tooltip section, which
+                    # requires simulating a hover before reading it — not
+                    # done here to avoid adding untested interaction to an
+                    # already fragile parser.
+                    #
+                    # To complete: refresh data/alimama_state.json with a
+                    # real login, then inspect detail_page's DOM for
+                    # orders/rating/supplier_score and the hover tooltip
+                    # for monthly_sales/shop_name before adding selectors.
                     "orders": 0,
 
                     "monthly_sales": 0,

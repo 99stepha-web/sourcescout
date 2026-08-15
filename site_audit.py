@@ -72,6 +72,32 @@ def audit_file(path):
         if not local_target_exists(src, path.parent):
             errors.append(f"missing local image: {src}")
 
+    ids = re.findall(r'\sid=["\']([^"\']+)["\']', html)
+    seen = set()
+    for id_value in ids:
+        if id_value in seen:
+            errors.append(f"duplicate id: {id_value}")
+        seen.add(id_value)
+
+    if path.parent.name == "products":
+        buy_tags = re.findall(r"<a\b[^>]*?>", html, re.S)
+        affiliate_hrefs = []
+
+        for tag in buy_tags:
+            if "buy-button" not in tag:
+                continue
+            href_match = re.search(r'href=["\']([^"\']+)["\']', tag, re.S)
+            if href_match:
+                affiliate_hrefs.append(href_match.group(1))
+
+        if not affiliate_hrefs:
+            errors.append("missing CTA (no buy-button link)")
+        elif not any(
+            "m.tb.cn/" in h or "s.click.taobao.com/" in h
+            for h in affiliate_hrefs
+        ):
+            errors.append(f"invalid affiliate URL: {affiliate_hrefs[0]}")
+
     return errors, canonical
 
 

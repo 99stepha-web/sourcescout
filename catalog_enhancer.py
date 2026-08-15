@@ -29,7 +29,10 @@ def enhance_seo():
 
     metadata = f"""
 {SEO_START}
+<meta name="robots" content="index,follow,max-image-preview:large">
 <link rel="canonical" href="{canonical}">
+<link rel="icon" type="image/png" href="/favicon.png">
+<link rel="apple-touch-icon" href="/favicon.png">
 <meta property="og:type" content="website">
 <meta property="og:title" content="Products | SourceScout">
 <meta property="og:description" content="Discover independently researched products, buying guides, and recommendations from SourceScout.">

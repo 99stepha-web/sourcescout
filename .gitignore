@@ -42,6 +42,9 @@ data/*.db
 *.sqlite
 *.sqlite3
 
+# Browser session / auth state (contains live login cookies)
+data/*_state.json
+
 # Streamlit cache
 .streamlit/secrets.toml
 

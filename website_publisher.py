@@ -513,6 +513,8 @@ def publish():
             encoding="utf-8",
         )
 
+        _mark_published(product["id"])
+
         print("\n✅ Published article:")
         print(f"   Product ID: {product['id']}")
         print(f"   Title: {product['title']}")
@@ -524,6 +526,28 @@ def publish():
         )
 
     return published
+
+
+def _mark_published(product_id):
+    """
+    Record the first time a product was actually written to disk.
+    Only fills published_at if it isn't already set, so republishing
+    an unchanged article doesn't reset its original publish date.
+    """
+
+    conn = sqlite3.connect(DB_PATH)
+
+    conn.execute(
+        """
+        UPDATE products
+        SET published_at = COALESCE(published_at, CURRENT_TIMESTAMP)
+        WHERE id = ?
+        """,
+        (product_id,),
+    )
+
+    conn.commit()
+    conn.close()
 
 
 
@@ -1339,7 +1363,7 @@ def deploy():
 
         inspect_new_urls(gsc, new_urls)
 
-    except Exception as e:
+    except (Exception, SystemExit) as e:
         print(f"ℹ️ Google Search Console automation skipped: {e}")
 
 
