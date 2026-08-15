@@ -15,6 +15,7 @@ SITEMAP_URL = "https://sourcescout.store/sitemap.xml"
 ROOT = Path(__file__).resolve().parent
 CREDENTIALS_FILE = ROOT / "google_credentials.json"
 TOKEN_FILE = ROOT / "google_token.json"
+INSPECTED_STATE_FILE = ROOT / "data" / "google_inspected_urls.json"
 
 SCOPES = [
     "https://www.googleapis.com/auth/webmasters",
@@ -155,6 +156,55 @@ def get_sitemap(service):
             ensure_ascii=False,
         )
     )
+
+
+def load_inspected_state():
+    if not INSPECTED_STATE_FILE.exists():
+        return {}
+
+    try:
+        return json.loads(INSPECTED_STATE_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def save_inspected_state(state):
+    INSPECTED_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    INSPECTED_STATE_FILE.write_text(
+        json.dumps(state, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+
+def filter_new_urls(urls):
+    """Return only URLs never previously inspected."""
+    state = load_inspected_state()
+    return [url for url in urls if url not in state]
+
+
+def inspect_new_urls(service, urls):
+    """
+    Inspect only URLs not already marked as inspected, then record
+    them as inspected. Distinguishes never-inspected / previously
+    inspected / newly published without re-checking old URLs.
+    """
+    state = load_inspected_state()
+    new_urls = [url for url in urls if url not in state]
+
+    if not new_urls:
+        print("\nℹ️ No newly published URLs to inspect.")
+        return []
+
+    results = []
+
+    for url in new_urls:
+        result = inspect_url(service, url)
+        results.append(result)
+        state[url] = {"status": "inspected", "last_checked": time.strftime("%Y-%m-%d")}
+
+    save_inspected_state(state)
+
+    return results
 
 
 def main():

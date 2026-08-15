@@ -33,6 +33,22 @@ Rules:
 - Identify important information that must be verified before promotion.
 - Be conservative when information is incomplete.
 
+A field showing 0, empty, or "unknown" means that data point was not
+captured during research — it does NOT mean the real-world value is zero.
+Distinguish two different situations and choose the decision accordingly:
+
+- INSUFFICIENT DATA: several key fields (orders, rating, supplier score)
+  are all missing/zero and there is nothing else to judge the product on.
+  This alone is not evidence the product is bad. Use REVIEW and say what
+  data is missing in "verification_needed".
+- BAD PRODUCT: the fields that ARE present show real negative signal
+  (e.g. a genuinely low rating with a real review count, a price far out
+  of line with the category, an obviously mismatched or low-quality
+  listing). Use SKIP and say why in "risks".
+
+Use PROMOTE only when the available evidence is genuinely positive, not
+merely absent.
+
 Return ONLY valid JSON using exactly this structure:
 
 {
@@ -66,9 +82,14 @@ Price: {product.price}
 Original Price: {product.original_price}
 Orders: {product.orders}
 Rating: {product.rating}
+Review Count: {product.review_count}
+Supplier: {product.supplier}
 Supplier Score: {product.supplier_score}
 Commission Rate: {product.commission_rate}%
 Algorithmic Opportunity Score: {product.opportunity_score}
+Research Keyword: {product.research_keyword}
+Product URL: {product.product_url}
+Image URL: {product.image_url}
 """
 
     response = client.messages.create(

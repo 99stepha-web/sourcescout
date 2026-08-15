@@ -50,3 +50,11 @@ data/*.db
 *.swp
 google_credentials.json
 google_token.json
+
+# Debug/scratch artifacts from development sessions
+*.backup
+*.backup_*
+promotion_clipboard.txt
+promotion_debug.txt
+card.html
+goods_card.html

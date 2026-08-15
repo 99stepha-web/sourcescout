@@ -1,930 +1,276 @@
-from datetime import datetime
-from typing import Any
-
 from database import SessionLocal
 from models import Product
+from affiliate.utils.url_utils import clean_affiliate_url
 
-from utils.data_cleaning import (
-    clean_text,
-    clean_float,
-    clean_int,
-)
 
+class ProductIngestion:
 
-# --------------------------------------------------
-# Data cleaning helpers
-# --------------------------------------------------
+    def __init__(self, db=None):
+        self.db = db or SessionLocal()
 
-def old_clean_text(value, default=""):
-    if value is None:
-        return default
+    def ingest(self, products):
 
-    return str(value).strip()
+        saved = []
 
+        for item in products:
 
-def old_clean_float(value, default=0.0):
-    try:
-        if value is None or value == "":
-            return default
+            title = item.get(
+                "title",
+                ""
+            ).strip()
 
-        return float(value)
+            if not title:
+                continue
 
-    except (TypeError, ValueError):
-        return default
-
-
-def old_clean_int(value, default=0):
-    try:
-        if value is None or value == "":
-            return default
-
-        return int(float(value))
-
-    except (TypeError, ValueError):
-        return default
-
-
-# --------------------------------------------------
-# Product validation
-# --------------------------------------------------
-
-def validate_product_data(data: dict[str, Any]):
-
-    required_fields = [
-        "platform",
-        "product_id",
-        "title",
-    ]
-
-    missing_fields = []
-
-    for field in required_fields:
-
-        value = data.get(field)
-
-        if value is None or str(value).strip() == "":
-            missing_fields.append(field)
-
-    if missing_fields:
-
-        raise ValueError(
-            "Missing required product fields: "
-            + ", ".join(missing_fields)
-        )
-
-
-# --------------------------------------------------
-# Normalize marketplace product
-# --------------------------------------------------
-
-def normalize_product_data(data: dict[str, Any]):
-
-    validate_product_data(data)
-
-    return {
-
-        "platform": clean_text(
-            data.get("platform")
-        ),
-
-        "product_id": clean_text(
-            data.get("product_id")
-        ),
-
-        "title": clean_text(
-            data.get("title")
-        ),
-
-        "category": clean_text(
-            data.get("category"),
-            "Uncategorized",
-        ),
-
-        "price": clean_float(
-            data.get("price")
-        ),
-
-        "original_price": clean_float(
-            data.get("original_price")
-        ),
-
-        "orders": clean_int(
-            data.get("orders")
-        ),
-
-        "rating": clean_float(
-            data.get("rating")
-        ),
-
-        "supplier": clean_text(
-            data.get("supplier")
-        ),
-
-        "moq": clean_text(
-            data.get("moq")
-        ),
-
-        "price_text": clean_text(
-            data.get("price_text")
-        ),
-
-        "price_min": clean_float(
-            data.get(
-                "price_min",
-                data.get("price"),
-            )
-        ),
-
-        "price_max": clean_float(
-            data.get("price_max")
-        ),
-
-        "review_count": clean_int(
-            data.get("review_count")
-        ),
-
-        "supplier_score": clean_float(
-            data.get("supplier_score")
-        ),
-
-        "commission_rate": clean_float(
-            data.get("commission_rate")
-        ),
-
-        "product_url": clean_text(
-            data.get("product_url")
-        ),
-
-        "affiliate_url": clean_text(
-            data.get("affiliate_url")
-        ),
-
-        "image_url": clean_text(
-            data.get("image_url")
-        ),
-    }
-
-
-# --------------------------------------------------
-# Opportunity scoring
-# --------------------------------------------------
-
-def calculate_opportunity_score(data):
-    """
-    Calculate a marketplace-aware opportunity score.
-
-    Maximum score: 100
-
-    Factors:
-    - Demand: 30 points
-    - Rating and review confidence: 25 points
-    - Supplier confidence: 15 points
-    - Price accessibility: 15 points
-    - MOQ accessibility: 10 points
-    - Affiliate commission: 5 points
-    """
-
-    score = 0.0
-
-    orders = clean_int(
-        data.get("orders")
-    )
-
-    rating = clean_float(
-        data.get("rating")
-    )
-
-    review_count = clean_int(
-        data.get("review_count")
-    )
-
-    supplier = clean_text(
-        data.get("supplier")
-    )
-
-    supplier_score = clean_float(
-        data.get("supplier_score")
-    )
-
-    commission_rate = clean_float(
-        data.get("commission_rate")
-    )
-
-    price = clean_float(
-        data.get(
-            "price_min",
-            data.get("price"),
-        )
-    )
-
-    moq = clean_text(
-        data.get("moq")
-    ).lower()
-
-    price_text = clean_text(
-        data.get("price_text")
-    ).lower()
-
-
-    # ----------------------------------------------
-    # 1. Demand — maximum 30 points
-    # ----------------------------------------------
-
-    if orders >= 10000:
-        score += 30
-
-    elif orders >= 5000:
-        score += 27
-
-    elif orders >= 1000:
-        score += 23
-
-    elif orders >= 500:
-        score += 19
-
-    elif orders >= 100:
-        score += 14
-
-    elif orders >= 20:
-        score += 8
-
-    elif orders > 0:
-        score += 4
-
-
-    # ----------------------------------------------
-    # 2. Rating + review confidence — max 25
-    # ----------------------------------------------
-
-    if rating >= 4.8:
-        rating_points = 18
-
-    elif rating >= 4.5:
-        rating_points = 15
-
-    elif rating >= 4.0:
-        rating_points = 10
-
-    elif rating > 0:
-        rating_points = 4
-
-    else:
-        rating_points = 0
-
-
-    if review_count >= 500:
-        review_points = 7
-
-    elif review_count >= 100:
-        review_points = 6
-
-    elif review_count >= 20:
-        review_points = 4
-
-    elif review_count >= 5:
-        review_points = 2
-
-    elif review_count > 0:
-        review_points = 1
-
-    else:
-        review_points = 0
-
-
-    score += (
-        rating_points
-        + review_points
-    )
-
-
-    # ----------------------------------------------
-    # 3. Supplier confidence — maximum 15
-    # ----------------------------------------------
-
-    if supplier_score >= 90:
-        score += 15
-
-    elif supplier_score >= 80:
-        score += 13
-
-    elif supplier_score >= 70:
-        score += 10
-
-    elif supplier_score > 0:
-        score += 6
-
-    elif supplier:
-        # Verified marketplace supplier information
-        # exists, but no numerical score is available.
-        score += 5
-
-
-    # ----------------------------------------------
-    # 4. Price accessibility — maximum 15
-    # ----------------------------------------------
-
-    # Detect listings where the displayed price is
-    # likely a component/unit measurement rather than
-    # the price of one complete retail product.
-
-    unit_pricing_terms = (
-        "watt",
-        "watts",
-        "meter",
-        "meters",
-        "kilogram",
-        "kilograms",
-        "kg",
-        "ton",
-        "tons",
-    )
-
-    has_unit_pricing = any(
-        term in moq
-        for term in unit_pricing_terms
-    )
-
-
-    if has_unit_pricing:
-
-        # Do not reward an artificially low unit price.
-        price_points = 3
-
-
-    elif 10 <= price <= 100:
-
-        price_points = 15
-
-
-    elif 100 < price <= 300:
-
-        price_points = 12
-
-
-    elif 300 < price <= 1000:
-
-        price_points = 8
-
-
-    elif price > 1000:
-
-        price_points = 4
-
-
-    elif 0 < price < 10:
-
-        # Low prices can be legitimate, but marketplace
-        # listings frequently use sample/component prices.
-        price_points = 6
-
-
-    else:
-
-        price_points = 0
-
-
-    score += price_points
-
-
-    # ----------------------------------------------
-    # 5. MOQ accessibility — maximum 10
-    # ----------------------------------------------
-
-    import re
-
-    moq_match = re.search(
-        r"\d+(?:\.\d+)?",
-        moq,
-    )
-
-
-    if has_unit_pricing:
-
-        moq_points = 2
-
-
-    elif moq_match:
-
-        moq_quantity = float(
-            moq_match.group()
-        )
-
-
-        if moq_quantity <= 1:
-
-            moq_points = 10
-
-
-        elif moq_quantity <= 5:
-
-            moq_points = 8
-
-
-        elif moq_quantity <= 20:
-
-            moq_points = 6
-
-
-        elif moq_quantity <= 100:
-
-            moq_points = 4
-
-
-        else:
-
-            moq_points = 2
-
-
-    else:
-
-        # Unknown MOQ should not receive the same
-        # reward as a confirmed low MOQ.
-
-        moq_points = 3
-
-
-    score += moq_points
-
-
-    # ----------------------------------------------
-    # 6. Affiliate commission — maximum 5
-    # ----------------------------------------------
-
-    if commission_rate >= 15:
-        score += 5
-
-    elif commission_rate >= 10:
-        score += 4
-
-    elif commission_rate >= 5:
-        score += 3
-
-    elif commission_rate > 0:
-        score += 1
-
-
-    return round(
-        min(
-            max(score, 0),
-            100,
-        ),
-        1,
-    )
-
-
-# --------------------------------------------------
-# Find existing product
-# --------------------------------------------------
-
-def find_existing_product(
-    db,
-    platform,
-    product_id,
-):
-
-    return (
-        db.query(Product)
-        .filter(
-            Product.platform == platform,
-            Product.product_id == product_id,
-        )
-        .first()
-    )
-
-
-# --------------------------------------------------
-# Import or update one product
-# --------------------------------------------------
-
-def ingest_product(
-    data,
-    db=None,
-):
-
-    owns_session = False
-
-    if db is None:
-
-        db = SessionLocal()
-
-        owns_session = True
-
-
-    try:
-
-        normalized = normalize_product_data(
-            data
-        )
-
-        normalized[
-            "opportunity_score"
-        ] = calculate_opportunity_score(
-            normalized
-        )
-
-
-        existing_product = (
-            find_existing_product(
-                db,
-                normalized["platform"],
-                normalized["product_id"],
-            )
-        )
-
-
-        if existing_product:
-
-            # Update marketplace information
-
-            existing_product.title = (
-                normalized["title"]
+            platform = item.get(
+                "platform",
+                "alimama"
             )
 
-            existing_product.category = (
-                normalized["category"]
+            product_id = item.get(
+                "product_id",
+                "",
             )
 
-            existing_product.price = (
-                normalized["price"]
-            )
+            # -------------------------------------------------
+            # Find existing product.
+            # Prefer platform + product_id (the strongest
+            # identifier). Fall back to title only when no
+            # product_id is available.
+            # -------------------------------------------------
 
-            existing_product.original_price = (
-                normalized["original_price"]
-            )
-
-            existing_product.orders = (
-                normalized["orders"]
-            )
-
-            existing_product.rating = (
-                normalized["rating"]
-            )
-
-            existing_product.supplier = (
-                normalized["supplier"]
-            )
-
-            existing_product.moq = (
-                normalized["moq"]
-            )
-
-            existing_product.price_text = (
-                normalized["price_text"]
-            )
-
-            existing_product.price_min = (
-                normalized["price_min"]
-            )
-
-            existing_product.price_max = (
-                normalized["price_max"]
-            )
-
-            existing_product.review_count = (
-                normalized["review_count"]
-            )
-
-            existing_product.supplier_score = (
-                normalized["supplier_score"]
-            )
-
-            existing_product.commission_rate = (
-                normalized["commission_rate"]
-            )
-
-            existing_product.product_url = (
-                normalized["product_url"]
-            )
-
-            # Only replace affiliate URL when
-            # a new non-empty value is provided.
-
-            if normalized["affiliate_url"]:
-
-                existing_product.affiliate_url = (
-                    normalized["affiliate_url"]
+            if product_id:
+                existing = (
+                    self.db.query(Product)
+                    .filter(
+                        Product.platform == platform,
+                        Product.product_id == product_id,
+                    )
+                    .first()
+                )
+            else:
+                existing = (
+                    self.db.query(Product)
+                    .filter(
+                        Product.platform == platform,
+                        Product.title == title,
+                    )
+                    .first()
                 )
 
+            # -------------------------------------------------
+            # UPDATE EXISTING PRODUCT
+            # -------------------------------------------------
 
-            # Only replace image when available.
+            if existing:
 
-            if normalized["image_url"]:
-
-                existing_product.image_url = (
-                    normalized["image_url"]
+                # Always update the real affiliate URL when
+                # a new Alimama promotion generates one.
+                raw_affiliate_url = item.get(
+                    "affiliate_url",
+                    "",
                 )
 
+                new_affiliate_url = clean_affiliate_url(
+                    raw_affiliate_url
+                )
 
-            existing_product.opportunity_score = (
-                normalized[
-                    "opportunity_score"
-                ]
-            )
+                print(
+                    "\n🔄 EXISTING PRODUCT UPDATE"
+                )
+                print(
+                    f"Product ID: {existing.id}"
+                )
+                print(
+                    f"Incoming affiliate URL: "
+                    f"{raw_affiliate_url}"
+                )
+                print(
+                    f"Clean affiliate URL: "
+                    f"{new_affiliate_url}"
+                )
 
+                if new_affiliate_url:
+                    existing.affiliate_url = new_affiliate_url
+                    print(
+                        "✅ Affiliate URL updated."
+                    )
+                else:
+                    print(
+                        "❌ Incoming affiliate URL could not "
+                        "be cleaned."
+                    )
 
-            db.commit()
+                new_product_url = item.get(
+                    "product_url",
+                    "",
+                )
 
-            db.refresh(
-                existing_product
-            )
+                if new_product_url:
+                    existing.product_url = new_product_url
 
+                new_image_url = item.get(
+                    "image_url",
+                    "",
+                )
 
-            result = {
+                if new_image_url:
+                    existing.image_url = new_image_url
 
-                "action": "updated",
+                keyword = item.get(
+                    "keyword",
+                    "",
+                )
 
-                "product_id":
-                    existing_product.id,
+                if keyword:
+                    existing.research_keyword = keyword
 
-                "marketplace_product_id":
-                    existing_product.product_id,
+                if item.get("commission_rate") is not None:
+                    existing.commission_rate = float(
+                        item.get(
+                            "commission_rate",
+                            0,
+                        )
+                    )
 
-                "title":
-                    existing_product.title,
+                existing.status = "DISCOVERED"
 
-                "opportunity_score":
-                    existing_product.opportunity_score,
-            }
+                saved.append(existing)
 
+                continue
 
-        else:
+            # -------------------------------------------------
+            # CREATE NEW PRODUCT
+            # -------------------------------------------------
 
             product = Product(
 
-                platform=normalized[
-                    "platform"
-                ],
+                platform=platform,
 
-                product_id=normalized[
-                    "product_id"
-                ],
+                product_id=item.get(
+                    "product_id",
+                    title,
+                ),
 
-                title=normalized[
-                    "title"
-                ],
+                title=title,
 
-                category=normalized[
-                    "category"
-                ],
+                category=item.get(
+                    "category",
+                    "Coffee",
+                ),
 
-                price=normalized[
-                    "price"
-                ],
+                # Pricing
+                price=float(
+                    item.get("price", 0)
+                ),
 
-                original_price=normalized[
-                    "original_price"
-                ],
+                original_price=float(
+                    item.get(
+                        "original_price",
+                        0
+                    )
+                ),
 
-                orders=normalized[
-                    "orders"
-                ],
+                price_text=item.get(
+                    "price_text",
+                    "",
+                ),
 
-                rating=normalized[
-                    "rating"
-                ],
+                price_min=float(
+                    item.get("price_min", 0)
+                ),
 
-                supplier=normalized[
-                    "supplier"
-                ],
+                price_max=float(
+                    item.get("price_max", 0)
+                ),
 
-                moq=normalized[
-                    "moq"
-                ],
+                # Sales
+                orders=int(
+                    item.get(
+                        "orders",
+                        item.get(
+                            "monthly_sales",
+                            0
+                        ),
+                    )
+                ),
 
-                price_text=normalized[
-                    "price_text"
-                ],
+                rating=float(
+                    item.get(
+                        "rating",
+                        0
+                    )
+                ),
 
-                price_min=normalized[
-                    "price_min"
-                ],
+                review_count=int(
+                    item.get(
+                        "review_count",
+                        0
+                    )
+                ),
 
-                price_max=normalized[
-                    "price_max"
-                ],
+                # Supplier
+                supplier=item.get(
+                    "supplier",
+                    item.get(
+                        "shop_name",
+                        "",
+                    ),
+                ),
 
-                review_count=normalized[
-                    "review_count"
-                ],
+                supplier_score=float(
+                    item.get(
+                        "supplier_score",
+                        0
+                    )
+                ),
 
-                supplier_score=normalized[
-                    "supplier_score"
-                ],
+                moq=item.get(
+                    "moq",
+                    "",
+                ),
 
-                commission_rate=normalized[
-                    "commission_rate"
-                ],
+                # Affiliate
+                commission_rate=float(
+                    item.get(
+                        "commission_rate",
+                        0
+                    )
+                ),
 
-                product_url=normalized[
-                    "product_url"
-                ],
+                # URLs
+                product_url=item.get(
+                    "product_url",
+                    "",
+                ),
 
-                affiliate_url=normalized[
-                    "affiliate_url"
-                ],
+                affiliate_url=clean_affiliate_url(
+                    item.get(
+                        "affiliate_url",
+                        "",
+                    )
+                ),
 
-                image_url=normalized[
-                    "image_url"
-                ],
+                image_url=item.get(
+                    "image_url",
+                    "",
+                ),
 
-                opportunity_score=normalized[
-                    "opportunity_score"
-                ],
+                # Discovery
+                discovery_source="alimama",
+
+                research_keyword=item.get(
+                    "keyword",
+                    "",
+                ),
 
                 status="DISCOVERED",
-
-                publish_status="draft",
             )
 
+            self.db.add(product)
 
-            db.add(
-                product
-            )
+            saved.append(product)
 
-            db.commit()
+        self.db.commit()
 
-            db.refresh(
-                product
-            )
-
-
-            result = {
-
-                "action": "created",
-
-                "product_id":
-                    product.id,
-
-                "marketplace_product_id":
-                    product.product_id,
-
-                "title":
-                    product.title,
-
-                "opportunity_score":
-                    product.opportunity_score,
-            }
-
-
-        return result
-
-
-    except Exception:
-
-        db.rollback()
-
-        raise
-
-
-    finally:
-
-        if owns_session:
-
-            db.close()
-
-
-# --------------------------------------------------
-# Import multiple products
-# --------------------------------------------------
-
-def ingest_products(
-    products,
-):
-
-    db = SessionLocal()
-
-    results = {
-
-        "created": 0,
-
-        "updated": 0,
-
-        "failed": 0,
-
-        "products": [],
-
-        "errors": [],
-    }
-
-
-    try:
-
-        for data in products:
-
-            try:
-
-                result = ingest_product(
-                    data,
-                    db=db,
-                )
-
-                action = result[
-                    "action"
-                ]
-
-                results[
-                    action
-                ] += 1
-
-                results[
-                    "products"
-                ].append(
-                    result
-                )
-
-
-            except Exception as error:
-
-                db.rollback()
-
-                results[
-                    "failed"
-                ] += 1
-
-                results[
-                    "errors"
-                ].append(
-                    {
-                        "title":
-                            data.get(
-                                "title",
-                                "Unknown product",
-                            ),
-
-                        "error":
-                            str(error),
-                    }
-                )
-
-
-        return results
-
-
-    finally:
-
-        db.close()
-
-
-# --------------------------------------------------
-# Test ingestion
-# --------------------------------------------------
-
-if __name__ == "__main__":
-
-    test_product = {
-
-        "platform":
-            "Alibaba",
-
-        "product_id":
-            "REAL-TEST-001",
-
-        "title":
-            "Smart Portable Mini Projector",
-
-        "category":
-            "Electronics",
-
-        "price":
-            59.99,
-
-        "original_price":
-            89.99,
-
-        "orders":
-            1250,
-
-        "rating":
-            4.8,
-
-        "supplier_score":
-            92,
-
-        "commission_rate":
-            8,
-
-        "product_url":
-            "https://example.com/product",
-
-        "affiliate_url":
-            "",
-
-        "image_url":
-            "",
-    }
-
-
-    result = ingest_product(
-        test_product
-    )
-
-
-    print()
-
-    print(
-        "✅ Product ingestion test completed."
-    )
-
-    print(
-        result
-    )
+        return saved

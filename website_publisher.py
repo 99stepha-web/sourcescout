@@ -1,7 +1,7 @@
 from homepage_seo import main as generate_homepage_seo
 from seo_metadata import enhance_all as enhance_seo_metadata
 from seo_generator import generate as generate_seo_files
-from catalog_enhancer import enhance
+from catalog_enhancer import enhance, enhance_seo as enhance_catalog_seo
 import html
 import json
 import re
@@ -174,11 +174,7 @@ def build_article_html(product):
 
 <head>
 
-    <meta name="robots" content="index,follow">
-    <link rel="canonical" href="https://sourcescout.store/">
-
     <meta name="author" content="SourceScout">
-    <meta property="og:type" content="article">
 
 
 
@@ -190,11 +186,6 @@ def build_article_html(product):
 >
 
 <title>{title} | SourceScout</title>
-
-<meta
-    name="description"
-    content="{excerpt}"
->
 
 <style>
 
@@ -436,6 +427,40 @@ def sanitize_published_html(content):
     return content
 
 
+BAD_CONTENT_MARKERS = ("[object Object]", "undefined", "None", "null")
+
+
+def validate_article(product, content):
+    errors = []
+
+    if not (product["title"] or "").strip():
+        errors.append("missing title")
+
+    if not content or len(content) < 500:
+        errors.append("missing article content")
+
+    if not (product["slug"] or "").strip():
+        errors.append("missing slug")
+
+    if not clean_affiliate_url(product["affiliate_url"] or ""):
+        errors.append("missing affiliate link")
+
+    if not (product["image_url"] or "").strip():
+        errors.append("missing product image")
+
+    if 'class="buy-button"' not in content:
+        errors.append("missing CTA")
+
+    if "```" in content:
+        errors.append("markdown code fence in HTML")
+
+    for marker in BAD_CONTENT_MARKERS:
+        if marker in content:
+            errors.append(f"raw '{marker}' in content")
+
+    return errors
+
+
 def publish():
 
     PRODUCTS_DIR.mkdir(
@@ -453,7 +478,27 @@ def publish():
 
     for product in products:
 
-        # Verify before writing.
+        try:
+            content = build_article_html(product)
+            content = sanitize_published_html(content)
+        except Exception as e:
+            print("\n❌ Article failed validation:")
+            print(f"   Product ID: {product['id']}")
+            print(f"   Title: {product['title']}")
+            print(f"   Failed stage: build/sanitize")
+            print(f"   Error: {e}")
+            continue
+
+        errors = validate_article(product, content)
+
+        if errors:
+            print("\n❌ Article failed validation:")
+            print(f"   Product ID: {product['id']}")
+            print(f"   Title: {product['title']}")
+            print(f"   Failed stage: validation")
+            print(f"   Error: {'; '.join(errors)}")
+            continue
+
         clean_url = clean_affiliate_url(
             product["affiliate_url"]
         )
@@ -461,10 +506,6 @@ def publish():
         filename = (
             PRODUCTS_DIR
             / f"{product['slug']}.html"
-        )
-
-        content = build_article_html(
-            product
         )
 
         filename.write_text(
@@ -1204,14 +1245,31 @@ def generate_homepage_products():
 
 
 def deploy():
-    generate_homepage_products()
-
-    generate_products_index()
+    print("\n========== PUBLISH ARTICLES ==========")
 
     published = publish()
 
     if not published:
         return
+
+    print("\n========== PRODUCT INDEX ==========")
+    generate_products_index()
+
+    print("\n========== HOMEPAGE ==========")
+    generate_homepage_products()
+
+    print("\n========== CATALOG FILTERS ==========")
+    enhance()
+    enhance_catalog_seo()
+
+    print("\n========== SITEMAP + ROBOTS.TXT ==========")
+    generate_seo_files()
+
+    print("\n========== SEO METADATA ==========")
+    enhance_seo_metadata()
+
+    print("\n========== HOMEPAGE SEO ==========")
+    generate_homepage_seo()
 
     print("\n========== GIT DEPLOY ==========")
 
@@ -1226,7 +1284,7 @@ def deploy():
             "git",
             "commit",
             "-m",
-            "Fix affiliate URLs",
+            "Publish new products and refresh SEO/catalog",
         ],
         cwd=SITE,
         capture_output=True,
@@ -1264,351 +1322,26 @@ def deploy():
             "Git commit failed."
         )
 
+    # Google Search Console automation.
+    # Never allowed to fail a successful website deployment.
+    print("\n========== GOOGLE SEARCH CONSOLE ==========")
 
+    try:
+        from google_search_console import build_service, submit_sitemap, inspect_new_urls
 
-# SOURCE_SCOUT_CATALOG_ENHANCER_START
+        gsc = build_service()
+        submit_sitemap(gsc)
 
-def enhance_product_index():
+        new_urls = [
+            "https://sourcescout.store/" + str(Path(p).relative_to(SITE)).replace("\\", "/")
+            for p in published
+        ]
 
-    output = Path(
-        "/Users/pro/product-finds-website/products.html"
-    )
+        inspect_new_urls(gsc, new_urls)
 
-    if not output.exists():
-        print("⚠️ products.html not found for enhancement.")
-        return
-
-    html = output.read_text(encoding="utf-8")
-
-    if 'id="scout-filter-input"' in html:
-        print("✅ Product catalog filters already present.")
-        return
-
-    css = """
-<style id="scout-catalog-css">
-.catalog-tools {
-    display: flex;
-    gap: 12px;
-    margin: 0 0 28px 0;
-    flex-wrap: wrap;
-}
-
-#scout-filter-input {
-    flex: 1;
-    min-width: 240px;
-    padding: 13px 16px;
-    border: 1px solid #d1d5db;
-    border-radius: 10px;
-    background: #fff;
-    font-size: 15px;
-}
-
-#scout-category,
-#scout-sort {
-    padding: 13px 16px;
-    border: 1px solid #d1d5db;
-    border-radius: 10px;
-    background: #fff;
-    font-size: 15px;
-}
-
-.scout-category {
-    display: inline-block;
-    margin-bottom: 10px;
-    padding: 5px 9px;
-    border-radius: 999px;
-    background: #f3f4f6;
-    color: #4b5563;
-    font-size: 11px;
-    font-weight: 700;
-    text-transform: uppercase;
-}
-
-#scout-no-results {
-    display: none;
-    text-align: center;
-    padding: 50px 20px;
-    color: #6b7280;
-}
-</style>
-"""
-
-    controls = """
-<div class="catalog-tools">
-
-    <input
-        id="scout-filter-input"
-        type="search"
-        placeholder="Search products..."
-        aria-label="Search products"
-    >
-
-    <select id="scout-category" aria-label="Category">
-        <option value="all">All Categories</option>
-        <option value="Coffee & Espresso">Coffee & Espresso</option>
-        <option value="Home & Kitchen">Home & Kitchen</option>
-        <option value="Beauty">Beauty</option>
-        <option value="Fashion">Fashion</option>
-        <option value="Electronics">Electronics</option>
-        <option value="Outdoor & Travel">Outdoor & Travel</option>
-        <option value="Other">Other</option>
-    </select>
-
-    <select id="scout-sort" aria-label="Sort">
-        <option value="latest">Latest</option>
-        <option value="az">A–Z</option>
-        <option value="za">Z–A</option>
-    </select>
-
-</div>
-
-<p id="scout-no-results">
-    No products match your search.
-</p>
-"""
-
-    script = """
-<script id="scout-catalog-js">
-(function () {
-
-    const input =
-        document.getElementById("scout-filter-input");
-
-    const category =
-        document.getElementById("scout-category");
-
-    const sort =
-        document.getElementById("scout-sort");
-
-    const grid =
-        document.querySelector(".product-grid");
-
-    const noResults =
-        document.getElementById("scout-no-results");
-
-    if (!input || !grid) {
-        return;
-    }
-
-    function updateCatalog() {
-
-        const query =
-            input.value.trim().toLowerCase();
-
-        const selected =
-            category ? category.value : "all";
-
-        const cards =
-            Array.from(
-                grid.querySelectorAll(".product-card")
-            );
-
-        cards.forEach(function (card) {
-
-            const text =
-                card.textContent.toLowerCase();
-
-            const cardCategory =
-                card.dataset.category || "Other";
-
-            const searchMatch =
-                !query || text.includes(query);
-
-            const categoryMatch =
-                selected === "all" ||
-                cardCategory === selected;
-
-            card.style.display =
-                searchMatch && categoryMatch
-                    ? ""
-                    : "none";
-        });
-
-        if (sort) {
-
-            cards.sort(function (a, b) {
-
-                const aText =
-                    a.textContent.trim();
-
-                const bText =
-                    b.textContent.trim();
-
-                if (sort.value === "az") {
-                    return aText.localeCompare(bText);
-                }
-
-                if (sort.value === "za") {
-                    return bText.localeCompare(aText);
-                }
-
-                return 0;
-            });
-
-            cards.forEach(function (card) {
-                grid.appendChild(card);
-            });
-        }
-
-        const visible =
-            cards.filter(function (card) {
-                return card.style.display !== "none";
-            });
-
-        if (noResults) {
-            noResults.style.display =
-                visible.length ? "none" : "block";
-        }
-    }
-
-    input.addEventListener(
-        "input",
-        updateCatalog
-    );
-
-    if (category) {
-        category.addEventListener(
-            "change",
-            updateCatalog
-        );
-    }
-
-    if (sort) {
-        sort.addEventListener(
-            "change",
-            updateCatalog
-        );
-    }
-
-})();
-</script>
-"""
-
-    # Insert controls immediately before product grid.
-    grid_marker = '<div class="product-grid">'
-
-    if grid_marker not in html:
-        print("❌ Product grid not found.")
-        return
-
-    html = html.replace(
-        grid_marker,
-        controls + "\n" + grid_marker,
-        1,
-    )
-
-    # Add category metadata to existing cards.
-    category_map = {
-        "Coffee & Espresso": [
-            "coffee", "espresso", "咖啡"
-        ],
-        "Home & Kitchen": [
-            "kitchen", "cooking", "home", "厨房", "家用"
-        ],
-        "Beauty": [
-            "beauty", "skincare", "makeup", "美容", "护肤"
-        ],
-        "Fashion": [
-            "jacket", "shirt", "dress", "bag", "shoes",
-            "fashion", "服装", "外套", "鞋", "包"
-        ],
-        "Electronics": [
-            "phone", "laptop", "tablet", "camera",
-            "headphone", "电子", "手机", "电脑", "耳机"
-        ],
-        "Outdoor & Travel": [
-            "travel", "camping", "outdoor",
-            "portable", "旅行", "户外", "便携"
-        ],
-    }
-
-    def category_for(card):
-        lower = re.sub("<[^>]+>", " ", card).lower()
-
-        for category, keywords in category_map.items():
-            if any(k in lower for k in keywords):
-                return category
-
-        return "Other"
-
-    def add_category(match):
-        tag = match.group(0)
-
-        if "data-category=" in tag:
-            return tag
-
-        return tag.replace(
-            'class="product-card"',
-            'class="product-card" data-category="'
-            + category_for(match.string[match.start():match.end()+400])
-            + '"',
-            1,
-        )
-
-    html = re.sub(
-        r'<article[^>]*class="product-card"[^>]*>',
-        add_category,
-        html,
-    )
-
-    # Insert CSS before </head>.
-    if "</head>" in html:
-        html = html.replace(
-            "</head>",
-            css + "\n</head>",
-            1,
-        )
-
-    # Insert JS before </body>.
-    if "</body>" in html:
-        html = html.replace(
-            "</body>",
-            script + "\n</body>",
-            1,
-        )
-
-    html = html.replace(
-        "<p id=\"scout-no-results\">",
-        "<p id=\"scout-no-results\">",
-    )
-
-    output.write_text(
-        html,
-        encoding="utf-8",
-    )
-
-    print("✅ Product index enhanced with search/category/sort.")
-
-
-# SOURCE_SCOUT_CATALOG_ENHANCER_END
+    except Exception as e:
+        print(f"ℹ️ Google Search Console automation skipped: {e}")
 
 
 if __name__ == "__main__":
     deploy()
-
-
-# Keep products.html enhancements after every publish.
-enhance()
-
-
-generate_seo_files()
-
-
-# Always regenerate SEO metadata after publishing articles.
-enhance_seo_metadata()
-
-
-generate_homepage_seo()
-
-
-# Search Console sitemap submission
-# Runs only when Google OAuth credentials are configured.
-try:
-    from google_search_console import build_service, submit_sitemap
-
-    print("\n========== GOOGLE SEARCH CONSOLE ==========")
-    gsc = build_service()
-    submit_sitemap(gsc)
-
-except Exception as e:
-    print(f"ℹ️ Search Console submission skipped: {e}")
