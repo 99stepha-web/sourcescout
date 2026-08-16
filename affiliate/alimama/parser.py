@@ -5,6 +5,7 @@ from playwright.sync_api import Page
 
 from affiliate.utils.url_utils import extract_stable_product_id
 from product_scoring import extract_badges
+import category_taxonomy
 
 
 class AlimamaParser:
@@ -327,7 +328,15 @@ class AlimamaParser:
 
                     "title": title,
 
-                    "category": "Coffee",
+                    # Derived from the title via the same taxonomy the
+                    # website catalog and category-relevance filter
+                    # already use — was previously hardcoded to
+                    # "Coffee" for every product regardless of what it
+                    # actually was (a leftover from before this parser
+                    # was generalized beyond coffee machines), which
+                    # fed Claude a false fact it correctly flagged as
+                    # a credibility risk.
+                    "category": category_taxonomy.category_for(title) or "General",
 
                     "price": price,
 

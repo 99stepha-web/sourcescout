@@ -124,7 +124,7 @@ Selection Score Breakdown / Reasons: {product.selection_reason}
 
     response = client.messages.create(
         model="claude-haiku-4-5",
-        max_tokens=500,
+        max_tokens=1200,
         temperature=0,
         system=SYSTEM_PROMPT,
         messages=[

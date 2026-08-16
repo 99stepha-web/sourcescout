@@ -156,7 +156,7 @@ class ProductIngestion:
                     "commission_amount", "monthly_sales", "monthly_promoters",
                     "today_sales", "price_percentile", "commission_percentile",
                     "shop_rating", "badges", "orders", "rating", "review_count",
-                    "supplier_score",
+                    "supplier_score", "category",
                 ):
                     value = item.get(field)
                     if value is not None:
